@@ -77,6 +77,13 @@ func Check(ctx context.Context, current string, client *http.Client) (Result, er
 		}
 		return Result{}, fmt.Errorf("无法连接 GitHub：%w", err)
 	}
+	if requestErr := requestContext.Err(); requestErr != nil {
+		_ = response.Body.Close()
+		if errors.Is(requestErr, context.DeadlineExceeded) {
+			return Result{}, errors.New("检查更新超时")
+		}
+		return Result{}, context.Canceled
+	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return Result{}, fmt.Errorf("GitHub 更新检查失败（HTTP %d）", response.StatusCode)
