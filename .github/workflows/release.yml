@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: 检出源码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 安装 Go
         uses: actions/setup-go@v5
@@ -60,12 +62,24 @@ jobs:
           "$hash  $(Split-Path $archive -Leaf)" |
             Set-Content -LiteralPath $checksum -Encoding ascii
 
+          $previousTag = (& git tag --sort=-version:refname | Where-Object { $_ -match '^v[0-9]+\.[0-9]+\.[0-9]+$' -and $_ -ne $tag } | Select-Object -First 1)
+          $changes = @()
+          if ($previousTag) {
+            $changes = @(git log --no-merges --pretty=format:'- %s' "$previousTag..$tag")
+          }
+          if ($changes.Count -eq 0) {
+            $changes = @('- 本次版本无额外提交说明')
+          }
+
           @(
             "Claude Patch $tag"
             ''
             '- Windows x64'
             '- 仅适配 Claude Code v2.1.233'
             '- 解压后运行 `claude-patch.exe`'
+            ''
+            '## 更新内容'
+            $changes
           ) | Set-Content -LiteralPath 'release-notes.md' -Encoding utf8
 
           gh release create $tag `
