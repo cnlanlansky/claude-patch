@@ -1,0 +1,7 @@
+config.json
+/dist/
+*.exe
+*.test
+*.log
+*.tmp
+*.tmp-*

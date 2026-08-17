@@ -1,0 +1,1 @@
+function Y_n(){if(!M1s())return[];let e=a4u(O1s());if(!e||e.baseUrl!==q.ANTHROPIC_BASE_URL)return[];return e.models.map((t)=>({value:t.id,label:t.display_name||t.id,description:"From gateway"}))}

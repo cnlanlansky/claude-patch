@@ -1,0 +1,1 @@
+function PT(e){if(!ku())return!1;let t=e??e4(),r=cs(t);if(yN(zo(r),"fast_mode"))return!0;let n=r.toLowerCase();return n.includes("opus-4-8")||n.includes("opus-5")

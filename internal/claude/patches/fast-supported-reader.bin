@@ -1,0 +1,1 @@
+function PT(e,t){if(!ku())return!1;e=cs(e??e4());return e.startsWith("claude-router/")?(!t||Y_n().find(n=>n.value==e).fast):yN(zo(e),"fast_mode")||/opus/.test(e)

@@ -1,0 +1,1174 @@
+package router
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/cnlanlansky/claude-patch/internal/config"
+)
+
+type ProxyRequest struct {
+	Model          string
+	UpstreamModel  string
+	ProviderID     string
+	SessionID      string
+	Protocol       config.Protocol
+	AllowFast      bool
+	ForceStreaming bool
+	Body           map[string]any
+	Headers        http.Header
+	Context        context.Context
+	WebSearch      func(context.Context, string, SearchOptions) ([]SearchResult, error)
+}
+
+type SearchOptions struct {
+	AllowedDomains []string
+	BlockedDomains []string
+	NumResults     int
+}
+
+type SearchResult struct {
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Snippet string `json:"snippet,omitempty"`
+}
+
+type NormalizedToolCall struct {
+	ID         string
+	Name       string
+	Arguments  string
+	ServerTool bool
+}
+
+type NormalizedResponse struct {
+	ID           string
+	Text         string
+	Tools        []NormalizedToolCall
+	FinishReason string
+	InputTokens  int
+	OutputTokens int
+}
+
+type UpstreamResponse struct {
+	Status int
+	Header http.Header
+	Body   []byte
+	Stream io.ReadCloser
+}
+
+var nonLetters = regexp.MustCompile(`[^a-z]`)
+
+func ProxyMessages(request ProxyRequest, provider config.Provider, client *http.Client) (*UpstreamResponse, error) {
+	if provider.Auth != config.AuthNone && strings.TrimSpace(provider.APIKey) == "" {
+		return nil, fmt.Errorf("Provider %s 缺少 API key", provider.Label)
+	}
+	if client == nil {
+		client = &http.Client{Timeout: time.Hour}
+	}
+	protocol := request.Protocol
+	if protocol == "" {
+		protocol = provider.Protocol
+	}
+	upstreamModel := request.UpstreamModel
+	if upstreamModel == "" {
+		upstreamModel = request.Model
+	}
+	aliases := responseToolAliases(provider, protocol, request.Body)
+	fast := request.AllowFast && stringValue(request.Body["speed"]) == "fast"
+	payload := anthropicBody(request.Body, upstreamModel, fast, isOpenCodeGo(provider.BaseURL))
+	path := "/v1/messages"
+	if protocol == config.OpenAIChat {
+		payload = toChatRequest(request.Body, upstreamModel, fast, request.ForceStreaming, aliases)
+		path = "/v1/chat/completions"
+	} else if protocol == config.OpenAIResponses {
+		payload = toResponsesRequest(request.Body, upstreamModel, fast, request.ForceStreaming, aliases)
+		path = "/v1/responses"
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	ctx := request.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL(provider.BaseURL, path), bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, err
+	}
+	upstream.Header = upstreamHeaders(provider, request.Headers, fast, protocol, request.ProviderID, request.SessionID)
+	response, err := client.Do(upstream)
+	if err != nil {
+		return nil, err
+	}
+	result := &UpstreamResponse{Status: response.StatusCode, Header: cloneResponseHeaders(response.Header)}
+	serverSearch := hasServerWebSearch(request.Body)
+	if response.StatusCode < 200 || response.StatusCode >= 300 || protocol == config.AnthropicMessages && !serverSearch {
+		result.Stream = response.Body
+		return result, nil
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxBodyBytes {
+		return nil, errors.New("upstream response body too large")
+	}
+	result.Body = raw
+	normalized, err := normalizeUpstream(raw, response.Header.Get("content-type"), protocol, aliases)
+	if err != nil {
+		return result, nil
+	}
+	if serverSearch {
+		for index := range normalized.Tools {
+			if isWebSearchTool(normalized.Tools[index].Name) {
+				normalized.Tools[index].ServerTool = true
+			}
+		}
+	}
+	if protocol == config.AnthropicMessages && !hasServerTool(normalized.Tools) {
+		return result, nil
+	}
+	searches := resolveSearches(ctx, normalized, request.WebSearch)
+	stream := boolValue(request.Body["stream"], true)
+	if stream {
+		result.Body = anthropicStream(normalized, request.Model, searches)
+		result.Header = http.Header{"Content-Type": []string{"text/event-stream"}, "Cache-Control": []string{"no-cache"}}
+	} else {
+		result.Body, _ = json.Marshal(anthropicResponse(normalized, request.Model, searches))
+		result.Header = http.Header{"Content-Type": []string{"application/json"}}
+	}
+	return result, nil
+}
+
+func upstreamHeaders(provider config.Provider, incoming http.Header, fast bool, protocol config.Protocol, providerID, sessionID string) http.Header {
+	headers := incoming.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	for _, name := range []string{"Host", "Content-Length", "X-Api-Key", "Authorization"} {
+		headers.Del(name)
+	}
+	if !fast {
+		values := splitHeader(headers.Get("Anthropic-Beta"))
+		filtered := values[:0]
+		for _, value := range values {
+			if value != "fast-mode-2026-02-01" {
+				filtered = append(filtered, value)
+			}
+		}
+		if len(filtered) > 0 {
+			headers.Set("Anthropic-Beta", strings.Join(filtered, ","))
+		} else {
+			headers.Del("Anthropic-Beta")
+		}
+	}
+	openCodeGoAnthropic := protocol == config.AnthropicMessages && isOpenCodeGo(provider.BaseURL)
+	openCodeFree := providerID == "opencode-free" && isOpenCodeFree(provider.BaseURL) && protocol == config.OpenAIChat
+	if openCodeFree {
+		for _, name := range []string{"X-Opencode-Client", "X-Opencode-Project", "X-Opencode-Request", "X-Opencode-Session", "X-Session-Affinity", "X-Session-Id"} {
+			headers.Del(name)
+		}
+		headers.Set("User-Agent", "opencode/1.18.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
+		headers.Set("X-Opencode-Client", "cli")
+		headers.Set("X-Opencode-Project", "global")
+		headers.Set("X-Opencode-Request", "msg_"+randomHex(16))
+		clean := strings.ReplaceAll(sessionID, "-", "")
+		if clean == "" {
+			clean = randomHex(16)
+		}
+		if !strings.HasPrefix(clean, "ses_") {
+			clean = "ses_" + clean
+		}
+		headers.Set("X-Opencode-Session", clean)
+	}
+	if provider.Auth == config.AuthAPIKey || openCodeGoAnthropic {
+		headers.Set("X-Api-Key", provider.APIKey)
+	} else if provider.Auth == config.AuthBearer {
+		headers.Set("Authorization", "Bearer "+provider.APIKey)
+	}
+	headers.Set("Content-Type", "application/json")
+	return headers
+}
+
+func upstreamURL(base, path string) string {
+	base = strings.TrimRight(base, "/")
+	if strings.HasSuffix(base, "/v1") && strings.HasPrefix(path, "/v1/") {
+		return base + strings.TrimPrefix(path, "/v1")
+	}
+	return base + path
+}
+
+func isOpenCodeGo(base string) bool {
+	parsed, err := url.Parse(strings.TrimRight(base, "/"))
+	return err == nil && strings.EqualFold(parsed.Hostname(), "opencode.ai") && parsed.Path == "/zen/go/v1"
+}
+
+func isOpenCodeFree(base string) bool {
+	parsed, err := url.Parse(strings.TrimRight(base, "/"))
+	return err == nil && strings.EqualFold(parsed.Hostname(), "opencode.ai") && parsed.Path == "/zen/v1"
+}
+
+func anthropicBody(body map[string]any, model string, allowFast, normalizeTools bool) map[string]any {
+	output := cloneMap(body)
+	output["model"] = model
+	if normalizeTools {
+		if messages, ok := body["messages"].([]any); ok {
+			output["messages"] = anthropicMessagesForGo(messages)
+		}
+		if tools, ok := body["tools"].([]any); ok {
+			output["tools"] = anthropicTools(tools)
+			choice := mapValue(body["tool_choice"])
+			if typeValue := stringValue(choice["type"]); typeValue == "tool" || typeValue == "any" {
+				output["tool_choice"] = map[string]any{"type": "auto"}
+			}
+		}
+	}
+	if !allowFast && stringValue(output["speed"]) == "fast" {
+		delete(output, "speed")
+	}
+	if !allowFast {
+		if betas, ok := output["betas"].([]any); ok {
+			var filtered []any
+			for _, beta := range betas {
+				if stringValue(beta) != "fast-mode-2026-02-01" {
+					filtered = append(filtered, beta)
+				}
+			}
+			output["betas"] = filtered
+		}
+	}
+	return output
+}
+
+func toChatRequest(body map[string]any, model string, allowFast, forceStreaming bool, aliases map[string]string) map[string]any {
+	request := map[string]any{
+		"model": model, "messages": anthropicMessages(body),
+		"stream": forceStreaming || boolValue(body["stream"], true),
+	}
+	if forceStreaming {
+		request["stream_options"] = map[string]any{"include_usage": true}
+	}
+	copyIfPresent(request, body, "max_tokens", "temperature", "top_p")
+	if allowFast && stringValue(body["speed"]) == "fast" {
+		request["service_tier"] = "priority"
+	}
+	if tools := toolsForOpenAI(body, aliases); len(tools) > 0 {
+		request["tools"] = tools
+	}
+	if choice := toolChoice(body, false, aliases); choice != nil {
+		request["tool_choice"] = choice
+	}
+	return request
+}
+
+func toResponsesRequest(body map[string]any, model string, allowFast, forceStreaming bool, aliases map[string]string) map[string]any {
+	request := map[string]any{
+		"model": model, "input": anthropicResponsesInput(body, aliases),
+		"stream": forceStreaming || boolValue(body["stream"], true),
+	}
+	if value, ok := body["max_tokens"]; ok {
+		request["max_output_tokens"] = value
+	}
+	if allowFast && stringValue(body["speed"]) == "fast" {
+		request["service_tier"] = "priority"
+	}
+	if tools := toolsForOpenAI(body, aliases); len(tools) > 0 {
+		flat := make([]any, 0, len(tools))
+		for _, tool := range tools {
+			function := mapValue(mapValue(tool)["function"])
+			flat = append(flat, map[string]any{"type": "function", "name": function["name"], "description": function["description"], "parameters": function["parameters"]})
+		}
+		request["tools"] = flat
+	}
+	if choice := toolChoice(body, true, aliases); choice != nil {
+		request["tool_choice"] = choice
+	}
+	return request
+}
+
+func anthropicMessages(body map[string]any) []any {
+	var output []any
+	if system, exists := body["system"]; exists {
+		output = append(output, map[string]any{"role": "system", "content": textFromContent(system)})
+	}
+	for _, raw := range sliceValue(body["messages"]) {
+		message := mapValue(raw)
+		role := stringValue(message["role"])
+		if role != "assistant" && role != "tool" {
+			role = "user"
+		}
+		content := message["content"]
+		if _, ok := content.(string); ok {
+			output = append(output, map[string]any{"role": role, "content": content})
+			continue
+		}
+		blocks := mapsFromSlice(content)
+		toolUses, toolResults := toolBlocks(blocks)
+		if role == "assistant" && len(toolUses) > 0 {
+			calls := make([]any, 0, len(toolUses))
+			for _, block := range toolUses {
+				arguments, _ := json.Marshal(valueOr(block["input"], map[string]any{}))
+				calls = append(calls, map[string]any{"id": stringOr(block["id"], "tool_call"), "type": "function", "function": map[string]any{"name": stringOr(block["name"], "tool"), "arguments": string(arguments)}})
+			}
+			output = append(output, map[string]any{"role": "assistant", "content": nullableText(content), "tool_calls": calls})
+		}
+		if len(toolResults) > 0 {
+			if len(toolUses) == 0 {
+				if text := textFromContent(content); text != "" {
+					output = append(output, map[string]any{"role": role, "content": text})
+				}
+			}
+			for _, result := range toolResults {
+				output = append(output, map[string]any{"role": "tool", "tool_call_id": stringOr(result["tool_use_id"], "tool_call"), "content": toolResultText(result["content"])})
+			}
+		}
+		if len(toolUses) == 0 && len(toolResults) == 0 {
+			output = append(output, map[string]any{"role": role, "content": textFromContent(content)})
+		}
+	}
+	return output
+}
+
+func anthropicResponsesInput(body map[string]any, aliases map[string]string) []any {
+	var output []any
+	if system, exists := body["system"]; exists {
+		output = append(output, map[string]any{"role": "system", "content": textFromContent(system)})
+	}
+	for _, raw := range sliceValue(body["messages"]) {
+		message := mapValue(raw)
+		role := "user"
+		if message["role"] == "assistant" {
+			role = "assistant"
+		}
+		if text, ok := message["content"].(string); ok {
+			output = append(output, map[string]any{"role": role, "content": text})
+			continue
+		}
+		blocks := mapsFromSlice(message["content"])
+		uses, results := toolBlocks(blocks)
+		if len(uses) > 0 {
+			if text := textFromContent(message["content"]); text != "" {
+				output = append(output, map[string]any{"role": "assistant", "content": text})
+			}
+			for _, block := range uses {
+				arguments, _ := json.Marshal(valueOr(block["input"], map[string]any{}))
+				output = append(output, map[string]any{"type": "function_call", "call_id": stringOr(block["id"], "tool_call"), "name": upstreamToolName(stringOr(block["name"], "tool"), aliases), "arguments": string(arguments)})
+			}
+		}
+		if len(results) > 0 {
+			if len(uses) == 0 {
+				if text := textFromContent(message["content"]); text != "" {
+					output = append(output, map[string]any{"role": "user", "content": text})
+				}
+			}
+			for _, result := range results {
+				output = append(output, map[string]any{"type": "function_call_output", "call_id": stringOr(result["tool_use_id"], "tool_call"), "output": toolResultText(result["content"])})
+			}
+		}
+		if len(uses) == 0 && len(results) == 0 {
+			output = append(output, map[string]any{"role": role, "content": textFromContent(message["content"])})
+		}
+	}
+	return output
+}
+
+func anthropicMessagesForGo(messages []any) []any {
+	var output []any
+	for _, raw := range messages {
+		message := mapValue(raw)
+		blocks, ok := message["content"].([]any)
+		if !ok {
+			output = append(output, message)
+			continue
+		}
+		maps := mapsFromSlice(blocks)
+		uses, results := toolBlocks(maps)
+		if len(uses) == 0 && len(results) == 0 {
+			output = append(output, message)
+			continue
+		}
+		if len(uses) > 0 {
+			content := make([]any, 0, len(maps))
+			for _, block := range maps {
+				typeName := stringValue(block["type"])
+				if typeName == "tool_result" || typeName == "web_search_tool_result" || typeName == "web_fetch_tool_result" {
+					continue
+				}
+				copy := cloneMap(block)
+				if typeName == "server_tool_use" {
+					copy["type"] = "tool_use"
+				}
+				content = append(content, copy)
+			}
+			copy := cloneMap(message)
+			copy["content"] = content
+			output = append(output, copy)
+		}
+		for _, result := range results {
+			output = append(output, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": result["tool_use_id"], "content": toolResultText(result["content"])}}})
+		}
+	}
+	return output
+}
+
+func anthropicTools(tools []any) []any {
+	output := make([]any, 0, len(tools))
+	for _, raw := range tools {
+		value := mapValue(raw)
+		typeName, name := stringValue(value["type"]), stringValue(value["name"])
+		if (!strings.HasPrefix(typeName, "web_search_") && !strings.HasPrefix(typeName, "web_fetch_")) || name == "" {
+			output = append(output, value)
+			continue
+		}
+		schema := emptyToolSchema()
+		if name == "web_search" {
+			schema = webSearchSchema()
+		} else if name == "web_fetch" {
+			schema = webFetchSchema()
+		}
+		tool := map[string]any{"name": name, "input_schema": schema}
+		if description := stringValue(value["description"]); description != "" {
+			tool["description"] = description
+		}
+		output = append(output, tool)
+	}
+	return output
+}
+
+func toolsForOpenAI(body map[string]any, aliases map[string]string) []any {
+	var tools []any
+	for _, raw := range sliceValue(body["tools"]) {
+		value := mapValue(raw)
+		function := mapValue(value["function"])
+		source := function
+		if len(source) == 0 {
+			source = value
+		}
+		name := stringValue(function["name"])
+		if name == "" {
+			name = stringValue(value["name"])
+		}
+		if name == "" {
+			continue
+		}
+		schema := mapValue(valueOr(source["parameters"], value["input_schema"]))
+		if stringValue(schema["type"]) != "object" {
+			typeName := stringValue(value["type"])
+			if name == "web_search" || strings.HasPrefix(typeName, "web_search_") {
+				schema = webSearchSchema()
+			} else if name == "web_fetch" || strings.HasPrefix(typeName, "web_fetch_") {
+				schema = webFetchSchema()
+			} else {
+				schema = emptyToolSchema()
+			}
+		}
+		description := stringValue(source["description"])
+		if description == "" {
+			if name == "web_search" {
+				description = "Search the web for current information."
+			} else if name == "web_fetch" {
+				description = "Fetch content from a URL."
+			} else {
+				description = "Execute the " + name + " tool."
+			}
+		}
+		tools = append(tools, map[string]any{"type": "function", "function": map[string]any{"name": upstreamToolName(name, aliases), "description": description, "parameters": schema}})
+	}
+	return tools
+}
+
+func toolChoice(body map[string]any, responses bool, aliases map[string]string) any {
+	choice := mapValue(body["tool_choice"])
+	typeName := stringValue(choice["type"])
+	if typeName == "auto" || typeName == "none" {
+		return typeName
+	}
+	if typeName == "any" {
+		return "required"
+	}
+	if typeName == "tool" && stringValue(choice["name"]) != "" {
+		name := upstreamToolName(stringValue(choice["name"]), aliases)
+		if responses {
+			return map[string]any{"type": "function", "name": name}
+		}
+		return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+	}
+	return nil
+}
+
+func responseToolAliases(provider config.Provider, protocol config.Protocol, body map[string]any) map[string]string {
+	aliases := map[string]string{}
+	if protocol != config.OpenAIResponses || !isOpenCodeGo(provider.BaseURL) {
+		return aliases
+	}
+	names := map[string]bool{}
+	for _, raw := range sliceValue(body["tools"]) {
+		names[stringValue(mapValue(raw)["name"])] = true
+	}
+	for _, raw := range sliceValue(body["tools"]) {
+		tool := mapValue(raw)
+		if stringValue(tool["name"]) != "web_search" || !strings.HasPrefix(stringValue(tool["type"]), "web_search_") {
+			continue
+		}
+		alias := "web_search_tool"
+		for names[alias] {
+			alias = "claude_" + alias
+		}
+		aliases["web_search"] = alias
+		names[alias] = true
+	}
+	return aliases
+}
+
+func normalizeUpstream(raw []byte, contentType string, protocol config.Protocol, aliases map[string]string) (NormalizedResponse, error) {
+	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		if protocol == config.AnthropicMessages {
+			return normalizeAnthropicStream(raw), nil
+		}
+		return normalizeOpenAIStream(raw, protocol, aliases), nil
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return NormalizedResponse{}, err
+	}
+	if protocol == config.AnthropicMessages {
+		return normalizeAnthropic(body), nil
+	}
+	if protocol == config.OpenAIResponses {
+		return normalizeResponses(body, aliases), nil
+	}
+	return normalizeChat(body), nil
+}
+
+func normalizeChat(body map[string]any) NormalizedResponse {
+	choice := mapValue(first(sliceValue(body["choices"])))
+	message := mapValue(valueOr(choice["message"], choice["delta"]))
+	var tools []NormalizedToolCall
+	for _, raw := range sliceValue(message["tool_calls"]) {
+		value := mapValue(raw)
+		function := mapValue(value["function"])
+		if name := stringValue(function["name"]); name != "" {
+			tools = append(tools, NormalizedToolCall{ID: stringOr(value["id"], "tool_call"), Name: name, Arguments: stringOr(function["arguments"], "{}")})
+		}
+	}
+	input, output := usage(body["usage"])
+	return NormalizedResponse{ID: stringOr(body["id"], "router_message"), Text: textFromContent(message["content"]), Tools: tools, FinishReason: stringValue(choice["finish_reason"]), InputTokens: input, OutputTokens: output}
+}
+
+func normalizeResponses(body map[string]any, aliases map[string]string) NormalizedResponse {
+	var text string
+	var tools []NormalizedToolCall
+	for _, raw := range sliceValue(body["output"]) {
+		item := mapValue(raw)
+		if item["type"] == "message" {
+			text += textFromContent(item["content"])
+		} else if item["type"] == "output_text" {
+			text += stringValue(item["text"])
+		} else if item["type"] == "function_call" && stringValue(item["name"]) != "" {
+			tools = append(tools, NormalizedToolCall{ID: stringOr(valueOr(item["call_id"], item["id"]), "tool_call"), Name: clientToolName(stringValue(item["name"]), aliases), Arguments: stringOr(item["arguments"], "{}")})
+		}
+	}
+	input, output := usage(body["usage"])
+	if text == "" {
+		text = textFromContent(body["output_text"])
+	}
+	finish := "stop"
+	if len(tools) > 0 {
+		finish = "tool_calls"
+	}
+	return NormalizedResponse{ID: stringOr(body["id"], "router_message"), Text: text, Tools: tools, FinishReason: finish, InputTokens: input, OutputTokens: output}
+}
+
+func normalizeAnthropic(body map[string]any) NormalizedResponse {
+	var tools []NormalizedToolCall
+	for _, raw := range sliceValue(body["content"]) {
+		block := mapValue(raw)
+		if block["type"] == "tool_use" || block["type"] == "server_tool_use" {
+			arguments, _ := json.Marshal(valueOr(block["input"], map[string]any{}))
+			tools = append(tools, NormalizedToolCall{ID: stringOr(block["id"], "tool_call"), Name: stringOr(block["name"], "tool"), Arguments: string(arguments)})
+		}
+	}
+	input, output := usage(body["usage"])
+	return NormalizedResponse{ID: stringOr(body["id"], "router_message"), Text: textFromContent(body["content"]), Tools: tools, FinishReason: stringValue(body["stop_reason"]), InputTokens: input, OutputTokens: output}
+}
+
+func normalizeOpenAIStream(raw []byte, protocol config.Protocol, aliases map[string]string) NormalizedResponse {
+	records := parseSSE(raw)
+	normalized := NormalizedResponse{ID: "router_message"}
+	tools := map[string]*NormalizedToolCall{}
+	var toolOrder []string
+	for _, frame := range records {
+		data := frame.data
+		response := mapValue(data["response"])
+		normalized.ID = stringOr(valueOr(data["id"], response["id"]), normalized.ID)
+		choice := mapValue(first(sliceValue(data["choices"])))
+		delta := mapValue(choice["delta"])
+		normalized.Text += textFromContent(delta["content"])
+		if reason := stringValue(choice["finish_reason"]); reason != "" {
+			normalized.FinishReason = reason
+		}
+		for _, rawTool := range sliceValue(delta["tool_calls"]) {
+			value := mapValue(rawTool)
+			function := mapValue(value["function"])
+			key := stringOr(valueOr(value["index"], value["id"]), strconv.Itoa(len(tools)))
+			tool := tools[key]
+			if tool == nil {
+				tool = &NormalizedToolCall{ID: stringOr(value["id"], "tool_call_"+key)}
+				tools[key] = tool
+				toolOrder = append(toolOrder, key)
+			}
+			if name := stringValue(function["name"]); name != "" {
+				tool.Name = name
+			}
+			tool.Arguments += stringValue(function["arguments"])
+		}
+		if frame.event == "response.output_text.delta" {
+			normalized.Text += stringValue(data["delta"])
+		}
+		if strings.HasPrefix(frame.event, "response.function_call_arguments.") || frame.event == "response.output_item.added" || frame.event == "response.output_item.done" {
+			item := mapValue(data["item"])
+			key := stringOr(valueOr(data["item_id"], valueOr(item["id"], item["call_id"])), strconv.Itoa(len(tools)))
+			tool := tools[key]
+			if tool == nil {
+				tool = &NormalizedToolCall{ID: stringOr(valueOr(item["call_id"], item["id"]), key)}
+				tools[key] = tool
+				toolOrder = append(toolOrder, key)
+			}
+			if name := stringValue(item["name"]); name != "" {
+				tool.Name = name
+			}
+			if arguments := stringValue(valueOr(data["arguments"], item["arguments"])); arguments != "" {
+				tool.Arguments = arguments
+			} else {
+				tool.Arguments += stringValue(data["delta"])
+			}
+		}
+		input, output := usage(valueOr(data["usage"], response["usage"]))
+		if input != 0 {
+			normalized.InputTokens = input
+		}
+		if output != 0 {
+			normalized.OutputTokens = output
+		}
+		if frame.event == "response.completed" {
+			normalized.FinishReason = "stop"
+		}
+	}
+	for _, key := range toolOrder {
+		tool := tools[key]
+		if tool.Name != "" {
+			tool.Name = clientToolName(tool.Name, aliases)
+			normalized.Tools = append(normalized.Tools, *tool)
+		}
+	}
+	if normalized.FinishReason == "" && protocol == config.OpenAIResponses {
+		normalized.FinishReason = "stop"
+	}
+	return normalized
+}
+
+func normalizeAnthropicStream(raw []byte) NormalizedResponse {
+	type block struct{ kind, id, name, text, input string }
+	blocks := map[string]*block{}
+	var blockOrder []string
+	normalized := NormalizedResponse{ID: "router_message"}
+	for _, frame := range parseSSE(raw) {
+		data := frame.data
+		if data["type"] == "message_start" {
+			message := mapValue(data["message"])
+			normalized.ID = stringOr(message["id"], normalized.ID)
+			normalized.InputTokens, normalized.OutputTokens = usage(message["usage"])
+		}
+		key := fmt.Sprint(valueOr(data["index"], len(blocks)))
+		if data["type"] == "content_block_start" {
+			value := mapValue(data["content_block"])
+			if _, exists := blocks[key]; !exists {
+				blockOrder = append(blockOrder, key)
+			}
+			blocks[key] = &block{kind: stringOr(value["type"], "text"), id: stringValue(value["id"]), name: stringValue(value["name"]), text: stringValue(value["text"])}
+		}
+		if data["type"] == "content_block_delta" {
+			value := mapValue(data["delta"])
+			if current := blocks[key]; current != nil {
+				if value["type"] == "text_delta" {
+					current.text += stringValue(value["text"])
+				}
+				if value["type"] == "input_json_delta" {
+					current.input += stringValue(value["partial_json"])
+				}
+			}
+		}
+		if data["type"] == "message_delta" {
+			normalized.FinishReason = stringValue(mapValue(data["delta"])["stop_reason"])
+			input, output := usage(data["usage"])
+			if input != 0 {
+				normalized.InputTokens = input
+			}
+			if output != 0 {
+				normalized.OutputTokens = output
+			}
+		}
+	}
+	for _, key := range blockOrder {
+		current := blocks[key]
+		if current.kind == "text" {
+			normalized.Text += current.text
+		}
+		if current.kind == "tool_use" || current.kind == "server_tool_use" {
+			normalized.Tools = append(normalized.Tools, NormalizedToolCall{ID: stringOr(current.id, "tool_call"), Name: stringOr(current.name, "tool"), Arguments: stringOr(current.input, "{}")})
+		}
+	}
+	return normalized
+}
+
+type searchResolution struct {
+	ID, Error string
+	Input     map[string]any
+	Results   []SearchResult
+}
+
+func resolveSearches(ctx context.Context, normalized NormalizedResponse, executor func(context.Context, string, SearchOptions) ([]SearchResult, error)) []searchResolution {
+	var output []searchResolution
+	if executor == nil {
+		executor = SearchWeb
+	}
+	for _, tool := range normalized.Tools {
+		if !tool.ServerTool {
+			continue
+		}
+		var input map[string]any
+		_ = json.Unmarshal([]byte(tool.Arguments), &input)
+		options := SearchOptions{AllowedDomains: stringsFrom(input["allowed_domains"]), BlockedDomains: stringsFrom(input["blocked_domains"]), NumResults: int(numberValue(input["numResults"]))}
+		results, err := executor(ctx, stringValue(input["query"]), options)
+		resolution := searchResolution{ID: tool.ID, Input: input, Results: results}
+		if err != nil {
+			resolution.Error = err.Error()
+		}
+		output = append(output, resolution)
+	}
+	return output
+}
+
+func anthropicResponse(normalized NormalizedResponse, model string, searches []searchResolution) map[string]any {
+	var content []any
+	if normalized.Text != "" {
+		content = append(content, map[string]any{"type": "text", "text": normalized.Text})
+	}
+	searchByID := map[string]searchResolution{}
+	for _, search := range searches {
+		searchByID[search.ID] = search
+	}
+	hasRegular := false
+	for _, tool := range normalized.Tools {
+		var input map[string]any
+		_ = json.Unmarshal([]byte(tool.Arguments), &input)
+		if search, ok := searchByID[tool.ID]; ok {
+			content = append(content, map[string]any{"type": "server_tool_use", "id": tool.ID, "name": "web_search", "input": input})
+			var result any
+			if search.Error != "" {
+				result = map[string]any{"error_code": "search_error"}
+			} else {
+				result = search.Results
+			}
+			content = append(content, map[string]any{"type": "web_search_tool_result", "tool_use_id": tool.ID, "content": result})
+		} else {
+			hasRegular = true
+			content = append(content, map[string]any{"type": "tool_use", "id": tool.ID, "name": tool.Name, "input": input})
+		}
+	}
+	stop := "end_turn"
+	if hasRegular {
+		stop = "tool_use"
+	} else if len(searches) == 0 && normalized.FinishReason == "length" {
+		stop = "max_tokens"
+	}
+	return map[string]any{"id": normalized.ID, "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": stop, "stop_sequence": nil, "usage": map[string]any{"input_tokens": normalized.InputTokens, "output_tokens": normalized.OutputTokens}}
+}
+
+func anthropicStream(normalized NormalizedResponse, model string, searches []searchResolution) []byte {
+	message := anthropicResponse(normalized, model, searches)
+	blocks := sliceValue(message["content"])
+	var output bytes.Buffer
+	writeSSE(&output, "message_start", map[string]any{"type": "message_start", "message": mergeMap(message, map[string]any{"content": []any{}, "stop_reason": nil})})
+	for index, raw := range blocks {
+		block := mapValue(raw)
+		typeName := stringValue(block["type"])
+		var start any
+		if typeName == "text" {
+			start = map[string]any{"type": "text", "text": ""}
+		} else if typeName == "tool_use" || typeName == "server_tool_use" {
+			start = map[string]any{"type": typeName, "id": block["id"], "name": block["name"], "input": map[string]any{}}
+		} else {
+			start = block
+		}
+		writeSSE(&output, "content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": start})
+		if typeName == "text" {
+			writeSSE(&output, "content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "text_delta", "text": block["text"]}})
+		}
+		if typeName == "tool_use" || typeName == "server_tool_use" {
+			bytes, _ := json.Marshal(block["input"])
+			writeSSE(&output, "content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "input_json_delta", "partial_json": string(bytes)}})
+		}
+		writeSSE(&output, "content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+	}
+	writeSSE(&output, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": message["stop_reason"], "stop_sequence": nil}, "usage": message["usage"]})
+	writeSSE(&output, "message_stop", map[string]any{"type": "message_stop"})
+	return output.Bytes()
+}
+
+type sseFrame struct {
+	event string
+	data  map[string]any
+}
+
+func parseSSE(raw []byte) []sseFrame {
+	var records []sseFrame
+	event := "message"
+	var data []string
+	flush := func() {
+		text := strings.TrimSpace(strings.Join(data, "\n"))
+		data = nil
+		if text != "" && text != "[DONE]" {
+			var value map[string]any
+			if json.Unmarshal([]byte(text), &value) == nil {
+				records = append(records, sseFrame{event, value})
+			}
+		}
+		event = "message"
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if line == "" {
+			flush()
+		} else if strings.HasPrefix(line, "event:") {
+			event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		} else if strings.HasPrefix(line, "data:") {
+			data = append(data, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	flush()
+	return records
+}
+func writeSSE(output *bytes.Buffer, event string, value any) {
+	data, _ := json.Marshal(value)
+	fmt.Fprintf(output, "event: %s\ndata: %s\n\n", event, data)
+}
+
+func SearchWeb(ctx context.Context, query string, options SearchOptions) ([]SearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	if len(query) > 2048 {
+		return nil, errors.New("web search query too long")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://html.duckduckgo.com/html/?q="+url.QueryEscape(query), nil)
+	request.Header.Set("User-Agent", "Mozilla/5.0 (Claude Patch)")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("search upstream returned HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 4*1024*1024+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > 4*1024*1024 {
+		return nil, errors.New("web search response too large")
+	}
+	return parseSearchHTML(string(body), options), nil
+}
+
+var resultLink = regexp.MustCompile(`(?is)<a\b([^>]*\bclass=["'][^"']*\bresult__a\b[^"']*[^>]*)>(.*?)</a>`)
+var resultSnippet = regexp.MustCompile(`(?is)<a\b[^>]*\bclass=["'][^"']*\bresult__snippet\b[^"']*["'][^>]*>(.*?)</a>`)
+var hrefAttr = regexp.MustCompile(`(?i)\bhref=["']([^"']+)["']`)
+var htmlTag = regexp.MustCompile(`<[^>]*>`)
+
+func parseSearchHTML(body string, options SearchOptions) []SearchResult {
+	limit := options.NumResults
+	if limit <= 0 {
+		limit = 8
+	}
+	if limit > 20 {
+		limit = 20
+	}
+	snippetMatches := resultSnippet.FindAllStringSubmatch(body, -1)
+	snippets := make([]string, len(snippetMatches))
+	for index, match := range snippetMatches {
+		snippets[index] = cleanHTML(match[1])
+	}
+	var output []SearchResult
+	for _, match := range resultLink.FindAllStringSubmatch(body, -1) {
+		href := hrefAttr.FindStringSubmatch(match[1])
+		if len(href) < 2 {
+			continue
+		}
+		parsed, err := url.Parse(href[1])
+		if err != nil {
+			continue
+		}
+		if redirect := parsed.Query().Get("uddg"); redirect != "" {
+			parsed, err = url.Parse(redirect)
+			if err != nil {
+				continue
+			}
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" || domainMatch(parsed, options.BlockedDomains) || len(options.AllowedDomains) > 0 && !domainMatch(parsed, options.AllowedDomains) {
+			continue
+		}
+		title := cleanHTML(match[2])
+		if title == "" {
+			continue
+		}
+		result := SearchResult{Title: title, URL: parsed.String()}
+		if len(output) < len(snippets) {
+			result.Snippet = snippets[len(output)]
+		}
+		output = append(output, result)
+		if len(output) >= limit {
+			break
+		}
+	}
+	return output
+}
+func cleanHTML(value string) string {
+	return strings.Join(strings.Fields(html.UnescapeString(htmlTag.ReplaceAllString(value, " "))), " ")
+}
+func domainMatch(value *url.URL, domains []string) bool {
+	host := strings.ToLower(value.Hostname())
+	for _, domain := range domains {
+		domain = strings.TrimLeft(strings.ToLower(strings.TrimSpace(domain)), ".")
+		if domain != "" && (host == domain || strings.HasSuffix(host, "."+domain)) {
+			return true
+		}
+	}
+	return false
+}
+
+func randomHex(size int) string {
+	bytes := make([]byte, size)
+	if _, err := rand.Read(bytes); err != nil {
+		panic("crypto/rand: " + err.Error())
+	}
+	return hex.EncodeToString(bytes)
+}
+
+func cloneResponseHeaders(source http.Header) http.Header {
+	result := source.Clone()
+	for _, value := range source.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			result.Del(strings.TrimSpace(name))
+		}
+	}
+	for name := range result {
+		if hopByHopHeader(name) {
+			result.Del(name)
+		}
+	}
+	return result
+}
+func splitHeader(value string) []string {
+	var output []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			output = append(output, item)
+		}
+	}
+	return output
+}
+func cloneMap(value map[string]any) map[string]any {
+	output := make(map[string]any, len(value))
+	for key, item := range value {
+		output[key] = item
+	}
+	return output
+}
+func mergeMap(left, right map[string]any) map[string]any {
+	output := cloneMap(left)
+	for key, value := range right {
+		output[key] = value
+	}
+	return output
+}
+func mapValue(value any) map[string]any {
+	if output, ok := value.(map[string]any); ok {
+		return output
+	}
+	return map[string]any{}
+}
+func sliceValue(value any) []any {
+	if output, ok := value.([]any); ok {
+		return output
+	}
+	return nil
+}
+func mapsFromSlice(value any) []map[string]any {
+	values := sliceValue(value)
+	output := make([]map[string]any, 0, len(values))
+	for _, item := range values {
+		output = append(output, mapValue(item))
+	}
+	return output
+}
+func stringValue(value any) string {
+	if output, ok := value.(string); ok {
+		return output
+	}
+	return ""
+}
+func stringOr(value any, fallback string) string {
+	if output := stringValue(value); output != "" {
+		return output
+	}
+	return fallback
+}
+func valueOr(value, fallback any) any {
+	if value != nil {
+		return value
+	}
+	return fallback
+}
+func boolValue(value any, fallback bool) bool {
+	if output, ok := value.(bool); ok {
+		return output
+	}
+	return fallback
+}
+func numberValue(value any) float64 {
+	if output, ok := value.(float64); ok {
+		return output
+	}
+	return 0
+}
+func first(values []any) any {
+	if len(values) > 0 {
+		return values[0]
+	}
+	return nil
+}
+func copyIfPresent(target, source map[string]any, names ...string) {
+	for _, name := range names {
+		if value, ok := source[name]; ok {
+			target[name] = value
+		}
+	}
+}
+func nullableText(value any) any {
+	if text := textFromContent(value); text != "" {
+		return text
+	}
+	return nil
+}
+func textFromContent(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	var output strings.Builder
+	for _, raw := range sliceValue(value) {
+		block := mapValue(raw)
+		if block["type"] == "text" || block["type"] == "output_text" {
+			output.WriteString(stringValue(block["text"]))
+		}
+	}
+	return output.String()
+}
+func toolResultText(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	if text := textFromContent(value); text != "" {
+		return text
+	}
+	bytes, _ := json.Marshal(valueOr(value, ""))
+	return string(bytes)
+}
+func toolBlocks(blocks []map[string]any) (uses, results []map[string]any) {
+	for _, block := range blocks {
+		switch stringValue(block["type"]) {
+		case "tool_use", "server_tool_use":
+			uses = append(uses, block)
+		case "tool_result", "web_search_tool_result", "web_fetch_tool_result":
+			results = append(results, block)
+		}
+	}
+	return
+}
+func upstreamToolName(name string, aliases map[string]string) string {
+	if alias := aliases[name]; alias != "" {
+		return alias
+	}
+	return name
+}
+func clientToolName(name string, aliases map[string]string) string {
+	for original, alias := range aliases {
+		if alias == name {
+			return original
+		}
+	}
+	return name
+}
+func isWebSearchTool(name string) bool {
+	return nonLetters.ReplaceAllString(strings.ToLower(name), "") == "websearch"
+}
+func hasServerWebSearch(body map[string]any) bool {
+	for _, raw := range sliceValue(body["tools"]) {
+		tool := mapValue(raw)
+		if strings.HasPrefix(stringValue(tool["type"]), "web_search_") && (tool["name"] == nil || isWebSearchTool(stringValue(tool["name"]))) {
+			return true
+		}
+	}
+	return false
+}
+func hasServerTool(tools []NormalizedToolCall) bool {
+	for _, tool := range tools {
+		if tool.ServerTool {
+			return true
+		}
+	}
+	return false
+}
+func usage(value any) (int, int) {
+	object := mapValue(value)
+	return int(numberValue(valueOr(object["prompt_tokens"], object["input_tokens"]))), int(numberValue(valueOr(object["completion_tokens"], object["output_tokens"])))
+}
+func stringsFrom(value any) []string {
+	var output []string
+	for _, item := range sliceValue(value) {
+		if text := stringValue(item); text != "" {
+			output = append(output, text)
+		}
+	}
+	return output
+}
+func emptyToolSchema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
+}
+func webSearchSchema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string", "description": "Web search query"}, "allowed_domains": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "blocked_domains": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "numResults": map[string]any{"type": "number"}}, "required": []any{"query"}, "additionalProperties": false}
+}
+func webFetchSchema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{"url": map[string]any{"type": "string"}, "format": map[string]any{"type": "string", "enum": []any{"text", "markdown", "html"}}, "timeout": map[string]any{"type": "number"}}, "required": []any{"url"}, "additionalProperties": false}
+}
