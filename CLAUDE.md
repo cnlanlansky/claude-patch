@@ -33,6 +33,7 @@ git diff --check
 ```
 
 - 测试命令最长 90 秒；不运行常驻后台服务。
+- 更新检查测试必须使用 fake HTTP client，不得自动化访问真实 GitHub；只允许用户显式点击时访问固定 Releases API。
 - `scripts/debug.ps1` 会覆盖 `dist\claude-patch.exe` 为 Console 版，交付前必须再执行 `scripts/build.ps1`。
 - 代码风格跟随相邻 Go 文件，优先标准库和现有 helper，不为单一实现新增抽象。
 

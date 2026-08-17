@@ -33,6 +33,8 @@ jobs:
 
       - name: 构建正式程序
         shell: pwsh
+        env:
+          CLAUDE_PATCH_VERSION: ${{ github.ref_name }}
         run: .\scripts\build.ps1
 
       - name: 打包并创建 Release

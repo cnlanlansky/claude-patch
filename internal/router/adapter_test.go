@@ -271,6 +271,43 @@ func TestParseSearchHTMLIncludesSnippetsAndFiltersDomains(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatStreamToolCallsMergeByNumericIndex(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"second","function":{"name":"second","arguments":"{\"value\":"}}, {"index":0,"id":"first","function":{"name":"first","arguments":"{\"value\":"}}]}}]}`,
+		"",
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}, {"index":1,"function":{"arguments":"2}"}}]}}]}`,
+		"",
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n"))
+	value := normalizeOpenAIStream(raw, config.OpenAIChat, nil)
+	if len(value.Tools) != 2 || value.Tools[0].ID != "second" || value.Tools[0].Name != "second" || value.Tools[0].Arguments != `{"value":2}` || value.Tools[1].ID != "first" || value.Tools[1].Name != "first" || value.Tools[1].Arguments != `{"value":1}` {
+		t.Fatalf("数字 index 工具分片未正确合并：%+v", value.Tools)
+	}
+}
+
+func TestOpenAIResponsesStreamToolCallsKeepItemKey(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"item":{"id":"item-1","call_id":"call-1","name":"lookup","arguments":""}}`,
+		"",
+		`event: response.function_call_arguments.delta`,
+		`data: {"item_id":"item-1","delta":"{\"query\":"}`,
+		"",
+		`event: response.function_call_arguments.delta`,
+		`data: {"item_id":"item-1","delta":"\"weather\"}"}`,
+		"",
+		`event: response.completed`,
+		`data: {"response":{"id":"response-1"}}`,
+		"",
+	}, "\n"))
+	value := normalizeOpenAIStream(raw, config.OpenAIResponses, nil)
+	if len(value.Tools) != 1 || value.Tools[0].ID != "call-1" || value.Tools[0].Name != "lookup" || value.Tools[0].Arguments != `{"query":"weather"}` || value.FinishReason != "stop" {
+		t.Fatalf("Responses 工具分片错误：%+v finish=%q", value.Tools, value.FinishReason)
+	}
+}
 func TestStreamToolOrderIsStable(t *testing.T) {
 	raw := []byte(strings.Join([]string{
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"second","function":{"name":"second","arguments":"{}"}},{"index":0,"id":"first","function":{"name":"first","arguments":"{}"}}]}}]}`,

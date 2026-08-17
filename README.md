@@ -81,15 +81,17 @@ where.exe claude
 .\scripts\build.ps1
 ```
 
-两条脚本都输出 `dist\claude-patch.exe`，所以程序读取 `dist\config.json`。调试脚本会生成 Console 版并覆盖正式产物；交付前重新执行 `build.ps1`。
+两条脚本都输出 `dist\claude-patch.exe`，所以程序读取 `dist\config.json`。脚本会把当前精确 Git tag 注入窗口标题；没有 tag 时使用 `dev`，也可以通过 `CLAUDE_PATCH_VERSION=v1.2.3` 显式指定。调试脚本会生成 Console 版并覆盖正式产物；交付前重新执行 `build.ps1`。
 
 也可以直接运行底层命令：
 
 ```powershell
 go test ./... -timeout=90s
 go vet ./...
-go build -trimpath -ldflags "-s -w -H=windowsgui" -o dist/claude-patch.exe ./cmd/claude-patch
+go build -trimpath -ldflags "-s -w -H=windowsgui -X github.com/cnlanlansky/claude-patch/internal/version.Current=v1.2.3" -o dist/claude-patch.exe ./cmd/claude-patch
 ```
+
+正式构建的 `-X ...=v1.2.3` 仅为示例；发布流水线会自动注入触发构建的 `vX.Y.Z` tag。
 
 绿色使用目录：
 
@@ -111,7 +113,9 @@ claude.cmd    # 点击“安装命令”后创建
 claude-patch.exe
 ```
 
-窗口会启动本地 Router，并显示 Claude 发现状态、Router 地址和命令代理状态。点击“打开 Web 管理”配置 Provider 与模型。双击不会自动启动 Claude。
+窗口会启动本地 Router，并显示 Claude 发现状态、Router 地址和命令代理状态。窗口标题包含 Claude Patch 自身版本（正式发布构建显示 `vX.Y.Z`，本地无 tag 构建显示 `dev`）。点击“打开 Web 管理”配置 Provider 与模型。双击不会自动启动 Claude。
+
+原生管理窗口底部的“检查更新”按钮会按需查询固定的 GitHub Releases API。发现新版本时打开对应 Release 页面供你手动下载；不会自动下载、替换或重启本程序。
 
 桌面设置提供两个开关：
 

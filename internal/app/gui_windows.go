@@ -3,6 +3,8 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -11,6 +13,8 @@ import (
 	"unsafe"
 
 	"github.com/cnlanlansky/claude-patch/internal/claude"
+	"github.com/cnlanlansky/claude-patch/internal/update"
+	"github.com/cnlanlansky/claude-patch/internal/version"
 	"golang.org/x/sys/windows"
 )
 
@@ -28,6 +32,7 @@ const (
 	wmApp            = 0x8000
 	wmTrayIcon       = wmApp + 1
 	wmShowManagement = wmApp + 2
+	wmUpdateComplete = wmApp + 3
 	wmLButtonDblClk  = 0x0203
 	wmRButtonUp      = 0x0205
 	wsVisible        = 0x10000000
@@ -46,6 +51,7 @@ const (
 	buttonOpenWeb = 101
 	buttonInstall = 102
 	buttonRemove  = 104
+	buttonUpdate  = 107
 	toggleStartup = 105
 	toggleTray    = 106
 
@@ -112,6 +118,7 @@ var (
 	procDestroyWindow          = guiUser32.NewProc("DestroyWindow")
 	procMessageBoxW            = guiUser32.NewProc("MessageBoxW")
 	procSetWindowTextW         = guiUser32.NewProc("SetWindowTextW")
+	procEnableWindow           = guiUser32.NewProc("EnableWindow")
 	procGetWindowTextLengthW   = guiUser32.NewProc("GetWindowTextLengthW")
 	procGetWindowTextW         = guiUser32.NewProc("GetWindowTextW")
 	procSendMessageW           = guiUser32.NewProc("SendMessageW")
@@ -159,7 +166,10 @@ var (
 	guiDPI           uint32 = 96
 	guiTrayAdded     bool
 	guiExiting       bool
+	guiUpdateCancel  context.CancelFunc
+	guiUpdateBusy    bool
 	taskbarCreated   uint32
+	guiUpdateResults = make(chan guiUpdateResult, 1)
 	guiFonts         map[fontKind]windows.Handle
 	guiCanvasBrush   windows.Handle
 	guiControls      = make(map[int]windows.Handle)
@@ -211,6 +221,11 @@ type drawItemStruct struct {
 	Bounds                                                rect
 	ItemData                                              uintptr
 }
+type guiUpdateResult struct {
+	value update.Result
+	err   error
+}
+
 type notifyIconData struct {
 	Size                       uint32
 	Window                     windows.Handle
@@ -237,7 +252,7 @@ func RunGUI(runtimeValue *Runtime, background bool) error {
 	}
 	guiSettings = settings
 	className := windows.StringToUTF16Ptr(managementWindowName)
-	title := windows.StringToUTF16Ptr("Claude Patch")
+	title := windows.StringToUTF16Ptr(fmt.Sprintf("Claude Patch %s", version.Current))
 	instance, _, _ := procGetModuleHandleW.Call(0)
 	guiInstance = windows.Handle(instance)
 	guiIcon = loadApplicationIcon(guiInstance)
@@ -322,6 +337,9 @@ func windowProc(window windows.Handle, messageID uint32, wParam uintptr, lParam 
 	case wmShowManagement:
 		showManagementWindow()
 		return 0
+	case wmUpdateComplete:
+		handleUpdateComplete()
+		return 0
 	case wmDPIChanged:
 		guiDPI = uint32(wParam & 0xffff)
 		if guiDPI == 0 {
@@ -347,6 +365,11 @@ func windowProc(window windows.Handle, messageID uint32, wParam uintptr, lParam 
 		procDestroyWindow.Call(uintptr(window))
 		return 0
 	case wmDestroy:
+		if guiUpdateCancel != nil {
+			guiUpdateCancel()
+			guiUpdateCancel = nil
+		}
+		guiUpdateBusy = false
 		removeTrayIcon(window)
 		destroyGUIResources()
 		_ = guiRuntime.Stop()
@@ -364,6 +387,7 @@ func createControls(parent windows.Handle) {
 	guiControls[buttonOpenWeb] = createControl(parent, "BUTTON", "打开 Web 管理", wsChild|wsVisible|wsTabStop|bsOwnerDraw, buttonOpenWeb, 0, 0, 0, 0)
 	guiControls[buttonInstall] = createControl(parent, "BUTTON", "安装命令", wsChild|wsVisible|wsTabStop|bsOwnerDraw, buttonInstall, 0, 0, 0, 0)
 	guiControls[buttonRemove] = createControl(parent, "BUTTON", "卸载命令", wsChild|wsVisible|wsTabStop|bsOwnerDraw, buttonRemove, 0, 0, 0, 0)
+	guiControls[buttonUpdate] = createControl(parent, "BUTTON", "检查更新", wsChild|wsVisible|wsTabStop|bsOwnerDraw, buttonUpdate, 0, 0, 0, 0)
 	guiControls[toggleStartup] = createControl(parent, "BUTTON", "登录 Windows 后启动", wsChild|wsVisible|wsTabStop|bsOwnerDraw, toggleStartup, 0, 0, 0, 0)
 	guiControls[toggleTray] = createControl(parent, "BUTTON", "关闭窗口后隐藏到托盘", wsChild|wsVisible|wsTabStop|bsOwnerDraw, toggleTray, 0, 0, 0, 0)
 	layoutControls()
@@ -380,9 +404,10 @@ func layoutControls() {
 		return
 	}
 	moveControl(guiStatusControl, 38, 552, 704, 24)
-	moveControl(guiControls[buttonOpenWeb], 30, 483, 212, 46)
-	moveControl(guiControls[buttonInstall], 260, 483, 220, 46)
-	moveControl(guiControls[buttonRemove], 494, 483, 220, 46)
+	moveControl(guiControls[buttonOpenWeb], 30, 483, 170, 46)
+	moveControl(guiControls[buttonInstall], 214, 483, 170, 46)
+	moveControl(guiControls[buttonRemove], 398, 483, 170, 46)
+	moveControl(guiControls[buttonUpdate], 582, 483, 168, 46)
 	moveControl(guiControls[toggleStartup], 46, 346, 668, 48)
 	moveControl(guiControls[toggleTray], 46, 404, 668, 48)
 }
@@ -406,6 +431,8 @@ func handleCommand(id uint16) {
 	case buttonRemove:
 		_, err := UninstallCommand(guiRuntime.Executable)
 		showOperation("命令代理已卸载，Claude Code 本体未修改。", err)
+	case buttonUpdate:
+		startUpdateCheck()
 	case toggleStartup:
 		if guiSettings.StartupConflict {
 			showError(fmt.Errorf("检测到同名但不属于 Claude Patch 的开机启动项，未做修改"))
@@ -434,6 +461,68 @@ func handleCommand(id uint16) {
 		procPostMessageW.Call(uintptr(guiWindow), wmClose, 0, 0)
 	}
 	refreshStatus()
+}
+
+func startUpdateCheck() {
+	if guiUpdateBusy || guiWindow == 0 {
+		return
+	}
+	guiUpdateBusy = true
+	button := guiControls[buttonUpdate]
+	if button != 0 {
+		procEnableWindow.Call(uintptr(button), 0)
+		setControlText(button, "检查中…")
+	}
+	setFeedback("正在检查 GitHub Releases…", false)
+	ctx, cancel := context.WithCancel(context.Background())
+	guiUpdateCancel = cancel
+	window := guiWindow
+	go func() {
+		value, err := update.Check(ctx, version.Current, nil)
+		guiUpdateResults <- guiUpdateResult{value: value, err: err}
+		procPostMessageW.Call(uintptr(window), wmUpdateComplete, 0, 0)
+	}()
+}
+
+func handleUpdateComplete() {
+	result := <-guiUpdateResults
+	if guiUpdateCancel != nil {
+		guiUpdateCancel()
+		guiUpdateCancel = nil
+	}
+	guiUpdateBusy = false
+	button := guiControls[buttonUpdate]
+	if button != 0 {
+		procEnableWindow.Call(uintptr(button), 1)
+		setControlText(button, "检查更新")
+	}
+	if result.err != nil {
+		if !errors.Is(result.err, context.Canceled) {
+			showError(result.err)
+		}
+		return
+	}
+	if result.value.DevelopmentBuild {
+		setFeedback(fmt.Sprintf("当前为开发构建；最新公开版本为 %s，无法比较。", result.value.LatestVersion), false)
+		return
+	}
+	if result.value.UpdateAvailable {
+		setFeedback(fmt.Sprintf("发现新版本 %s，当前为 %s。", result.value.LatestVersion, result.value.CurrentVersion), false)
+		if err := OpenURL(result.value.ReleaseURL); err != nil {
+			showError(err)
+		}
+		return
+	}
+	if result.value.CurrentAhead {
+		setFeedback(fmt.Sprintf("当前版本 %s 高于最新公开版本 %s。", result.value.CurrentVersion, result.value.LatestVersion), false)
+		return
+	}
+	setFeedback(fmt.Sprintf("当前已是最新版本 %s。", result.value.CurrentVersion), false)
+}
+
+func setControlText(control windows.Handle, value string) {
+	text := windows.StringToUTF16Ptr(value)
+	procSetWindowTextW.Call(uintptr(control), uintptr(unsafe.Pointer(text)))
 }
 
 func showOperation(message string, err error) {
@@ -547,7 +636,7 @@ func drawOwnerControl(item *drawItemStruct) bool {
 	procSetBkMode.Call(uintptr(item.DC), 1)
 	id := int(item.ControlID)
 	switch id {
-	case buttonOpenWeb, buttonInstall, buttonRemove:
+	case buttonOpenWeb, buttonInstall, buttonRemove, buttonUpdate:
 		primary := id == buttonOpenWeb
 		fill, border, textColor := uint32(colorCard), uint32(colorLine), uint32(colorInk)
 		if primary {

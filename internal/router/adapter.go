@@ -626,7 +626,7 @@ func normalizeOpenAIStream(raw []byte, protocol config.Protocol, aliases map[str
 		for _, rawTool := range sliceValue(delta["tool_calls"]) {
 			value := mapValue(rawTool)
 			function := mapValue(value["function"])
-			key := stringOr(valueOr(value["index"], value["id"]), strconv.Itoa(len(tools)))
+			key := stringOr(fmt.Sprint(valueOr(value["index"], valueOr(value["id"], ""))), strconv.Itoa(len(tools)))
 			tool := tools[key]
 			if tool == nil {
 				tool = &NormalizedToolCall{ID: stringOr(value["id"], "tool_call_"+key)}
