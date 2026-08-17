@@ -213,7 +213,7 @@ func TestOpenCodeGoAnthropicAuthenticationAndServerToolNormalization(t *testing.
 }
 
 func TestOpenAIToolSchemasDescriptionsAndConversationLinks(t *testing.T) {
-	chat := toChatRequest(map[string]any{
+	chat, err := toChatRequest(map[string]any{
 		"messages": []any{
 			map[string]any{"role": "user", "content": "search"},
 			map[string]any{"role": "assistant", "content": []any{
@@ -231,6 +231,9 @@ func TestOpenAIToolSchemasDescriptionsAndConversationLinks(t *testing.T) {
 			map[string]any{"name": "custom"},
 		},
 	}, "upstream", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	messages := sliceValue(chat["messages"])
 	assistantCalls := sliceValue(mapValue(messages[1])["tool_calls"])
 	if len(messages) != 3 || stringValue(mapValue(first(assistantCalls))["id"]) != "call-search" || stringValue(mapValue(messages[2])["tool_call_id"]) != "call-search" || mapValue(messages[2])["content"] != "sunny" {
@@ -246,7 +249,7 @@ func TestOpenAIToolSchemasDescriptionsAndConversationLinks(t *testing.T) {
 		t.Fatalf("OpenAI 工具 schema/description 错误：%v", tools)
 	}
 
-	responses := toResponsesRequest(map[string]any{"messages": []any{
+	responses, err := toResponsesRequest(map[string]any{"messages": []any{
 		map[string]any{"role": "assistant", "content": []any{
 			map[string]any{"type": "tool_use", "id": "call-search", "name": "web_search", "input": map[string]any{"query": "Guangzhou"}},
 		}},
@@ -318,5 +321,143 @@ func TestStreamToolOrderIsStable(t *testing.T) {
 		if len(value.Tools) != 2 || value.Tools[0].ID != "second" || value.Tools[1].ID != "first" {
 			t.Fatalf("工具顺序不稳定：%+v", value.Tools)
 		}
+	}
+}
+
+func TestChatMixedToolResultContentKeepsAssistantToolUserOrder(t *testing.T) {
+	chat, err := toChatRequest(map[string]any{"messages": []any{
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "tool_use", "id": "call-1", "name": "lookup", "input": map[string]any{"query": "weather"}},
+		}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "继续"},
+			map[string]any{"type": "tool_result", "tool_use_id": "call-1", "content": "晴天"},
+		}},
+	}}, "upstream", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := sliceValue(chat["messages"])
+	if len(messages) != 3 || stringValue(mapValue(messages[0])["role"]) != "assistant" || stringValue(mapValue(messages[1])["role"]) != "tool" || stringValue(mapValue(messages[2])["role"]) != "user" {
+		t.Fatalf("混合 tool_result 顺序错误：%v", messages)
+	}
+	call := mapValue(first(sliceValue(mapValue(messages[0])["tool_calls"])))
+	if stringValue(call["id"]) != "call-1" || stringValue(mapValue(messages[1])["tool_call_id"]) != "call-1" || mapValue(messages[1])["content"] != "晴天" || mapValue(messages[2])["content"] != "继续" {
+		t.Fatalf("混合 tool_result 内容错误：%v", messages)
+	}
+}
+
+func TestChatServerToolResultHistoryIsAccepted(t *testing.T) {
+	chat, err := toChatRequest(map[string]any{"messages": []any{
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "text", "text": "查询中"},
+			map[string]any{"type": "server_tool_use", "id": "server-1", "name": "web_search", "input": map[string]any{"query": "weather"}},
+			map[string]any{"type": "web_search_tool_result", "tool_use_id": "server-1", "content": "晴天"},
+		}},
+		map[string]any{"role": "user", "content": "继续"},
+	}}, "upstream", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := sliceValue(chat["messages"])
+	if len(messages) != 3 || stringValue(mapValue(messages[0])["role"]) != "assistant" || stringValue(mapValue(messages[1])["role"]) != "tool" || stringValue(mapValue(messages[1])["tool_call_id"]) != "server-1" || stringValue(mapValue(messages[2])["role"]) != "user" {
+		t.Fatalf("server tool 历史转换错误：%v", messages)
+	}
+}
+
+func TestAnthropicServerToolResultHistoryIsAccepted(t *testing.T) {
+	client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(response, `{}`)
+	}))
+	provider := config.Provider{Label: "OpenCode Go", BaseURL: "https://opencode.ai/zen/go/v1", Protocol: config.AnthropicMessages, Auth: config.AuthBearer, APIKey: "test-key"}
+	_, err := ProxyMessages(ProxyRequest{Model: "router-model", Protocol: config.AnthropicMessages, Body: map[string]any{"messages": []any{
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "server_tool_use", "id": "server-1", "name": "web_search", "input": map[string]any{"query": "weather"}},
+			map[string]any{"type": "web_search_tool_result", "tool_use_id": "server-1", "content": "晴天"},
+		}},
+	}}}, provider, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+func TestChatToolIDsFailBeforeProxyRequest(t *testing.T) {
+	tests := []struct {
+		name, want string
+		messages   []any
+	}{
+		{
+			name: "missing", want: "缺少 id",
+			messages: []any{map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "name": "lookup", "input": map[string]any{}},
+			}}},
+		},
+		{
+			name: "unknown", want: "未匹配",
+			messages: []any{map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "missing", "content": "结果"},
+			}}},
+		},
+		{
+			name: "duplicate", want: "重复",
+			messages: []any{map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "call-1", "name": "first", "input": map[string]any{}},
+				map[string]any{"type": "tool_use", "id": "call-1", "name": "second", "input": map[string]any{}},
+			}}},
+		},
+		{
+			name: "unclosed", want: "未收到",
+			messages: []any{map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "call-open", "name": "lookup", "input": map[string]any{}},
+			}}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requests := 0
+			client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				requests++
+				_, _ = io.WriteString(response, `{}`)
+			}))
+			_, err := ProxyMessages(ProxyRequest{
+				Model: "router-model", Protocol: config.OpenAIChat,
+				Body: map[string]any{"messages": test.messages, "stream": false},
+			}, config.Provider{Label: "Fake", BaseURL: "https://provider.invalid", Protocol: config.OpenAIChat, Auth: config.AuthNone}, client)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("tool ID 错误未拒绝：%v", err)
+			}
+			if requests != 0 {
+				t.Fatalf("转换失败后仍发送上游请求：%d", requests)
+			}
+		})
+	}
+}
+
+func TestResponsesMixedToolOrderingAndMissingID(t *testing.T) {
+	responses, err := toResponsesRequest(map[string]any{"messages": []any{
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "text", "text": "先查"},
+			map[string]any{"type": "tool_use", "id": "call-1", "name": "lookup", "input": map[string]any{"query": "weather"}},
+		}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "继续"},
+			map[string]any{"type": "tool_result", "tool_use_id": "call-1", "content": "晴天"},
+		}},
+	}}, "upstream", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := sliceValue(responses["input"])
+	if len(input) != 4 || stringValue(mapValue(input[0])["role"]) != "assistant" || mapValue(input[1])["type"] != "function_call" || mapValue(input[2])["type"] != "function_call_output" || stringValue(mapValue(input[3])["role"]) != "user" {
+		t.Fatalf("Responses 混合顺序错误：%v", input)
+	}
+	if mapValue(input[0])["content"] != "先查" || stringValue(mapValue(input[1])["call_id"]) != "call-1" || mapValue(input[2])["output"] != "晴天" || mapValue(input[3])["content"] != "继续" {
+		t.Fatalf("Responses 混合内容错误：%v", input)
+	}
+	_, err = toResponsesRequest(map[string]any{"messages": []any{map[string]any{"role": "assistant", "content": []any{
+		map[string]any{"type": "tool_use", "name": "lookup", "input": map[string]any{}},
+	}}}}, "upstream", false, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "缺少 id") {
+		t.Fatalf("Responses 缺失 tool_use ID 未拒绝：%v", err)
 	}
 }

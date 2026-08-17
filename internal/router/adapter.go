@@ -21,6 +21,16 @@ import (
 	"github.com/cnlanlansky/claude-patch/internal/config"
 )
 
+type RequestConversionError struct {
+	Err error
+}
+
+func (err *RequestConversionError) Error() string {
+	return "请求消息转换失败：" + err.Err.Error()
+}
+
+func (err *RequestConversionError) Unwrap() error { return err.Err }
+
 type ProxyRequest struct {
 	Model          string
 	UpstreamModel  string
@@ -89,14 +99,24 @@ func ProxyMessages(request ProxyRequest, provider config.Provider, client *http.
 	}
 	aliases := responseToolAliases(provider, protocol, request.Body)
 	fast := request.AllowFast && stringValue(request.Body["speed"]) == "fast"
-	payload := anthropicBody(request.Body, upstreamModel, fast, isOpenCodeGo(provider.BaseURL))
+	var payload map[string]any
+	var err error
 	path := "/v1/messages"
 	if protocol == config.OpenAIChat {
-		payload = toChatRequest(request.Body, upstreamModel, fast, request.ForceStreaming, aliases)
+		payload, err = toChatRequest(request.Body, upstreamModel, fast, request.ForceStreaming, aliases)
 		path = "/v1/chat/completions"
 	} else if protocol == config.OpenAIResponses {
-		payload = toResponsesRequest(request.Body, upstreamModel, fast, request.ForceStreaming, aliases)
+		payload, err = toResponsesRequest(request.Body, upstreamModel, fast, request.ForceStreaming, aliases)
 		path = "/v1/responses"
+	} else {
+		payload, err = anthropicBody(request.Body, upstreamModel, fast, isOpenCodeGo(provider.BaseURL))
+	}
+	if err != nil {
+		var conversionErr *RequestConversionError
+		if errors.As(err, &conversionErr) {
+			return nil, err
+		}
+		return nil, &RequestConversionError{Err: err}
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -224,12 +244,16 @@ func isOpenCodeFree(base string) bool {
 	return err == nil && strings.EqualFold(parsed.Hostname(), "opencode.ai") && parsed.Path == "/zen/v1"
 }
 
-func anthropicBody(body map[string]any, model string, allowFast, normalizeTools bool) map[string]any {
+func anthropicBody(body map[string]any, model string, allowFast, normalizeTools bool) (map[string]any, error) {
 	output := cloneMap(body)
 	output["model"] = model
 	if normalizeTools {
 		if messages, ok := body["messages"].([]any); ok {
-			output["messages"] = anthropicMessagesForGo(messages)
+			converted, err := anthropicMessagesForGo(messages)
+			if err != nil {
+				return nil, err
+			}
+			output["messages"] = converted
 		}
 		if tools, ok := body["tools"].([]any); ok {
 			output["tools"] = anthropicTools(tools)
@@ -253,12 +277,16 @@ func anthropicBody(body map[string]any, model string, allowFast, normalizeTools 
 			output["betas"] = filtered
 		}
 	}
-	return output
+	return output, nil
 }
 
-func toChatRequest(body map[string]any, model string, allowFast, forceStreaming bool, aliases map[string]string) map[string]any {
+func toChatRequest(body map[string]any, model string, allowFast, forceStreaming bool, aliases map[string]string) (map[string]any, error) {
+	messages, err := anthropicMessages(body)
+	if err != nil {
+		return nil, &RequestConversionError{Err: err}
+	}
 	request := map[string]any{
-		"model": model, "messages": anthropicMessages(body),
+		"model": model, "messages": messages,
 		"stream": forceStreaming || boolValue(body["stream"], true),
 	}
 	if forceStreaming {
@@ -274,12 +302,16 @@ func toChatRequest(body map[string]any, model string, allowFast, forceStreaming 
 	if choice := toolChoice(body, false, aliases); choice != nil {
 		request["tool_choice"] = choice
 	}
-	return request
+	return request, nil
 }
 
-func toResponsesRequest(body map[string]any, model string, allowFast, forceStreaming bool, aliases map[string]string) map[string]any {
+func toResponsesRequest(body map[string]any, model string, allowFast, forceStreaming bool, aliases map[string]string) (map[string]any, error) {
+	input, err := anthropicResponsesInput(body, aliases)
+	if err != nil {
+		return nil, &RequestConversionError{Err: err}
+	}
 	request := map[string]any{
-		"model": model, "input": anthropicResponsesInput(body, aliases),
+		"model": model, "input": input,
 		"stream": forceStreaming || boolValue(body["stream"], true),
 	}
 	if value, ok := body["max_tokens"]; ok {
@@ -299,54 +331,202 @@ func toResponsesRequest(body map[string]any, model string, allowFast, forceStrea
 	if choice := toolChoice(body, true, aliases); choice != nil {
 		request["tool_choice"] = choice
 	}
-	return request
+	return request, nil
 }
 
-func anthropicMessages(body map[string]any) []any {
+type toolCallLedger struct {
+	pending map[string]struct{}
+}
+
+func newToolCallLedger() toolCallLedger {
+	return toolCallLedger{pending: make(map[string]struct{})}
+}
+
+func validateUseIDs(groups ...[]map[string]any) error {
+	ids := make(map[string]struct{})
+	for _, uses := range groups {
+		for _, use := range uses {
+			id := stringValue(use["id"])
+			if id == "" {
+				return errors.New("tool_use 缺少 id")
+			}
+			if _, exists := ids[id]; exists {
+				return fmt.Errorf("tool_use id 重复：%s", id)
+			}
+			ids[id] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func (ledger *toolCallLedger) addUses(uses []map[string]any) error {
+	if err := validateUseIDs(uses); err != nil {
+		return err
+	}
+	for _, use := range uses {
+		id := stringValue(use["id"])
+		if _, exists := ledger.pending[id]; exists {
+			return fmt.Errorf("tool_use id 未闭合前再次出现：%s", id)
+		}
+	}
+	for _, use := range uses {
+		ledger.pending[stringValue(use["id"])] = struct{}{}
+	}
+	return nil
+}
+
+func resultID(result map[string]any) string {
+	return stringOr(result["tool_use_id"], stringValue(result["tool_call_id"]))
+}
+
+func (ledger *toolCallLedger) consumeResults(results []map[string]any) error {
+	ids := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		id := resultID(result)
+		if id == "" {
+			return errors.New("tool_result 缺少 tool_use_id")
+		}
+		if _, exists := ids[id]; exists {
+			return fmt.Errorf("tool_result id 重复：%s", id)
+		}
+		if _, exists := ledger.pending[id]; !exists {
+			return fmt.Errorf("tool_result 未匹配 tool_use：%s", id)
+		}
+		ids[id] = struct{}{}
+	}
+	for id := range ids {
+		delete(ledger.pending, id)
+	}
+	return nil
+}
+
+func (ledger *toolCallLedger) hasPending() bool {
+	return len(ledger.pending) > 0
+}
+
+func (ledger *toolCallLedger) requireComplete() error {
+	if len(ledger.pending) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(ledger.pending))
+	for id := range ledger.pending {
+		ids = append(ids, id)
+	}
+	return fmt.Errorf("tool_use 未收到对应 tool_result：%s", strings.Join(ids, ","))
+}
+
+func anthropicMessages(body map[string]any) ([]any, error) {
 	var output []any
+	ledger := newToolCallLedger()
 	if system, exists := body["system"]; exists {
 		output = append(output, map[string]any{"role": "system", "content": textFromContent(system)})
 	}
 	for _, raw := range sliceValue(body["messages"]) {
 		message := mapValue(raw)
 		role := stringValue(message["role"])
-		if role != "assistant" && role != "tool" {
-			role = "user"
-		}
 		content := message["content"]
-		if _, ok := content.(string); ok {
-			output = append(output, map[string]any{"role": role, "content": content})
-			continue
-		}
-		blocks := mapsFromSlice(content)
-		toolUses, toolResults := toolBlocks(blocks)
-		if role == "assistant" && len(toolUses) > 0 {
-			calls := make([]any, 0, len(toolUses))
-			for _, block := range toolUses {
-				arguments, _ := json.Marshal(valueOr(block["input"], map[string]any{}))
-				calls = append(calls, map[string]any{"id": stringOr(block["id"], "tool_call"), "type": "function", "function": map[string]any{"name": stringOr(block["name"], "tool"), "arguments": string(arguments)}})
+		if role == "assistant" {
+			if ledger.hasPending() {
+				return nil, errors.New("tool_calls 后缺少 tool message")
 			}
-			output = append(output, map[string]any{"role": "assistant", "content": nullableText(content), "tool_calls": calls})
-		}
-		if len(toolResults) > 0 {
-			if len(toolUses) == 0 {
-				if text := textFromContent(content); text != "" {
-					output = append(output, map[string]any{"role": role, "content": text})
+			if _, ok := content.(string); ok {
+				output = append(output, map[string]any{"role": "assistant", "content": content})
+				continue
+			}
+			blocks := classifyToolBlocks(mapsFromSlice(content))
+			if len(blocks.clientResults) > 0 {
+				return nil, errors.New("assistant 消息不能包含 tool_result")
+			}
+			if err := validateUseIDs(blocks.clientUses, blocks.serverUses); err != nil {
+				return nil, err
+			}
+			if err := validateServerResults(blocks.serverUses, blocks.serverResults); err != nil {
+				return nil, err
+			}
+			if len(blocks.clientUses) > 0 {
+				if err := ledger.addUses(blocks.clientUses); err != nil {
+					return nil, err
 				}
 			}
-			for _, result := range toolResults {
-				output = append(output, map[string]any{"role": "tool", "tool_call_id": stringOr(result["tool_use_id"], "tool_call"), "content": toolResultText(result["content"])})
+			if len(blocks.uses) > 0 {
+				calls := make([]any, 0, len(blocks.uses))
+				for _, block := range blocks.uses {
+					name := stringValue(block["name"])
+					if name == "" {
+						return nil, fmt.Errorf("tool_use %s 缺少 name", stringValue(block["id"]))
+					}
+					arguments, _ := json.Marshal(valueOr(block["input"], map[string]any{}))
+					calls = append(calls, map[string]any{"id": block["id"], "type": "function", "function": map[string]any{"name": name, "arguments": string(arguments)}})
+				}
+				output = append(output, map[string]any{"role": "assistant", "content": nullableText(content), "tool_calls": calls})
 			}
+			for _, result := range blocks.serverResults {
+				output = append(output, map[string]any{"role": "tool", "tool_call_id": resultID(result), "content": toolResultText(result["content"])})
+			}
+			if len(blocks.uses) > 0 || len(blocks.serverResults) > 0 {
+				continue
+			}
+			output = append(output, map[string]any{"role": "assistant", "content": textFromContent(content)})
+			continue
 		}
-		if len(toolUses) == 0 && len(toolResults) == 0 {
-			output = append(output, map[string]any{"role": role, "content": textFromContent(content)})
+		if role == "tool" {
+			id := resultID(message)
+			if err := ledger.consumeResults([]map[string]any{message}); err != nil {
+				return nil, err
+			}
+			output = append(output, map[string]any{"role": "tool", "tool_call_id": id, "content": toolResultText(content)})
+			continue
 		}
+		if role == "system" {
+			if ledger.hasPending() {
+				return nil, errors.New("tool_calls 后不能插入 system 消息")
+			}
+			output = append(output, map[string]any{"role": "system", "content": textFromContent(content)})
+			continue
+		}
+		if role != "user" {
+			role = "user"
+		}
+		if text, ok := content.(string); ok {
+			if ledger.hasPending() {
+				return nil, errors.New("tool_calls 后缺少 tool message")
+			}
+			output = append(output, map[string]any{"role": role, "content": text})
+			continue
+		}
+		blocks := classifyToolBlocks(mapsFromSlice(content))
+		if len(blocks.uses) > 0 {
+			return nil, errors.New("user 消息不能包含 tool_use")
+		}
+		if len(blocks.serverResults) > 0 {
+			return nil, errors.New("user 消息不能包含 server tool_result")
+		}
+		if len(blocks.clientResults) > 0 {
+			if err := ledger.consumeResults(blocks.clientResults); err != nil {
+				return nil, err
+			}
+			for _, result := range blocks.clientResults {
+				output = append(output, map[string]any{"role": "tool", "tool_call_id": resultID(result), "content": toolResultText(result["content"])})
+			}
+			if text := textFromContent(content); text != "" {
+				output = append(output, map[string]any{"role": "user", "content": text})
+			}
+			continue
+		}
+		if ledger.hasPending() {
+			return nil, errors.New("tool_calls 后缺少 tool message")
+		}
+		output = append(output, map[string]any{"role": role, "content": textFromContent(content)})
 	}
-	return output
+	if err := ledger.requireComplete(); err != nil {
+		return nil, err
+	}
+	return output, nil
 }
 
-func anthropicResponsesInput(body map[string]any, aliases map[string]string) []any {
+func anthropicResponsesInput(body map[string]any, aliases map[string]string) ([]any, error) {
 	var output []any
+	ledger := newToolCallLedger()
 	if system, exists := body["system"]; exists {
 		output = append(output, map[string]any{"role": "system", "content": textFromContent(system)})
 	}
@@ -356,75 +536,163 @@ func anthropicResponsesInput(body map[string]any, aliases map[string]string) []a
 		if message["role"] == "assistant" {
 			role = "assistant"
 		}
-		if text, ok := message["content"].(string); ok {
+		content := message["content"]
+		if text, ok := content.(string); ok {
+			if ledger.hasPending() {
+				return nil, errors.New("tool_calls 后缺少 tool message")
+			}
 			output = append(output, map[string]any{"role": role, "content": text})
 			continue
 		}
-		blocks := mapsFromSlice(message["content"])
-		uses, results := toolBlocks(blocks)
-		if len(uses) > 0 {
-			if text := textFromContent(message["content"]); text != "" {
-				output = append(output, map[string]any{"role": "assistant", "content": text})
+		blocks := classifyToolBlocks(mapsFromSlice(content))
+		if role == "assistant" {
+			if len(blocks.clientResults) > 0 {
+				return nil, errors.New("assistant 消息不能包含 tool_result")
 			}
-			for _, block := range uses {
-				arguments, _ := json.Marshal(valueOr(block["input"], map[string]any{}))
-				output = append(output, map[string]any{"type": "function_call", "call_id": stringOr(block["id"], "tool_call"), "name": upstreamToolName(stringOr(block["name"], "tool"), aliases), "arguments": string(arguments)})
+			if err := validateUseIDs(blocks.clientUses, blocks.serverUses); err != nil {
+				return nil, err
 			}
-		}
-		if len(results) > 0 {
-			if len(uses) == 0 {
-				if text := textFromContent(message["content"]); text != "" {
-					output = append(output, map[string]any{"role": "user", "content": text})
+			if err := validateServerResults(blocks.serverUses, blocks.serverResults); err != nil {
+				return nil, err
+			}
+			if len(blocks.clientUses) > 0 {
+				if err := ledger.addUses(blocks.clientUses); err != nil {
+					return nil, err
 				}
 			}
-			for _, result := range results {
-				output = append(output, map[string]any{"type": "function_call_output", "call_id": stringOr(result["tool_use_id"], "tool_call"), "output": toolResultText(result["content"])})
+			if len(blocks.uses) > 0 {
+				if text := textFromContent(content); text != "" {
+					output = append(output, map[string]any{"role": "assistant", "content": text})
+				}
+				for _, block := range blocks.uses {
+					id := stringValue(block["id"])
+					name := stringValue(block["name"])
+					if name == "" {
+						return nil, fmt.Errorf("tool_use %s 缺少 name", id)
+					}
+					arguments, _ := json.Marshal(valueOr(block["input"], map[string]any{}))
+					output = append(output, map[string]any{"type": "function_call", "call_id": id, "name": upstreamToolName(name, aliases), "arguments": string(arguments)})
+				}
 			}
+			for _, result := range blocks.serverResults {
+				output = append(output, map[string]any{"type": "function_call_output", "call_id": resultID(result), "output": toolResultText(result["content"])})
+			}
+			if len(blocks.uses) > 0 || len(blocks.serverResults) > 0 {
+				continue
+			}
+			if ledger.hasPending() {
+				return nil, errors.New("tool_calls 后缺少 tool message")
+			}
+			output = append(output, map[string]any{"role": "assistant", "content": textFromContent(content)})
+			continue
 		}
-		if len(uses) == 0 && len(results) == 0 {
-			output = append(output, map[string]any{"role": role, "content": textFromContent(message["content"])})
+		if len(blocks.uses) > 0 || len(blocks.serverResults) > 0 {
+			return nil, errors.New("user 消息不能包含 tool_use")
 		}
+		if len(blocks.clientResults) > 0 {
+			if err := ledger.consumeResults(blocks.clientResults); err != nil {
+				return nil, err
+			}
+			for _, result := range blocks.clientResults {
+				output = append(output, map[string]any{"type": "function_call_output", "call_id": resultID(result), "output": toolResultText(result["content"])})
+			}
+			if text := textFromContent(content); text != "" {
+				output = append(output, map[string]any{"role": "user", "content": text})
+			}
+			continue
+		}
+		if ledger.hasPending() {
+			return nil, errors.New("tool_calls 后缺少 tool message")
+		}
+		output = append(output, map[string]any{"role": role, "content": textFromContent(content)})
 	}
-	return output
+	if err := ledger.requireComplete(); err != nil {
+		return nil, err
+	}
+	return output, nil
 }
 
-func anthropicMessagesForGo(messages []any) []any {
+func anthropicMessagesForGo(messages []any) ([]any, error) {
 	var output []any
+	ledger := newToolCallLedger()
 	for _, raw := range messages {
 		message := mapValue(raw)
-		blocks, ok := message["content"].([]any)
-		if !ok {
-			output = append(output, message)
-			continue
-		}
-		maps := mapsFromSlice(blocks)
-		uses, results := toolBlocks(maps)
-		if len(uses) == 0 && len(results) == 0 {
-			output = append(output, message)
-			continue
-		}
-		if len(uses) > 0 {
-			content := make([]any, 0, len(maps))
-			for _, block := range maps {
-				typeName := stringValue(block["type"])
-				if typeName == "tool_result" || typeName == "web_search_tool_result" || typeName == "web_fetch_tool_result" {
-					continue
-				}
-				copy := cloneMap(block)
-				if typeName == "server_tool_use" {
-					copy["type"] = "tool_use"
-				}
-				content = append(content, copy)
+		role := stringValue(message["role"])
+		content := message["content"]
+		if role == "assistant" {
+			if ledger.hasPending() {
+				return nil, errors.New("tool_calls 后缺少 tool message")
 			}
-			copy := cloneMap(message)
-			copy["content"] = content
-			output = append(output, copy)
+			blocks := classifyToolBlocks(mapsFromSlice(content))
+			if err := validateUseIDs(blocks.clientUses, blocks.serverUses); err != nil {
+				return nil, err
+			}
+			if err := validateServerResults(blocks.serverUses, blocks.serverResults); err != nil {
+				return nil, err
+			}
+			if len(blocks.clientResults) > 0 {
+				return nil, errors.New("assistant 消息不能包含 tool_result")
+			}
+			if len(blocks.clientUses) > 0 {
+				if err := ledger.addUses(blocks.clientUses); err != nil {
+					return nil, err
+				}
+			}
+			if len(blocks.uses) > 0 {
+				copy := cloneMap(message)
+				clean := make([]any, 0, len(blocks.uses))
+				for _, block := range blocks.uses {
+					item := cloneMap(block)
+					if stringValue(item["type"]) == "server_tool_use" {
+						item["type"] = "tool_use"
+					}
+					clean = append(clean, item)
+				}
+				copy["content"] = clean
+				output = append(output, copy)
+			}
+			for _, result := range blocks.serverResults {
+				output = append(output, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": resultID(result), "content": toolResultText(result["content"])}}})
+			}
+			if len(blocks.uses) > 0 || len(blocks.serverResults) > 0 {
+				continue
+			}
+			output = append(output, message)
+			continue
 		}
-		for _, result := range results {
-			output = append(output, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": result["tool_use_id"], "content": toolResultText(result["content"])}}})
+		blocks, ok := content.([]any)
+		if !ok {
+			if ledger.hasPending() {
+				return nil, errors.New("tool_calls 后缺少 tool message")
+			}
+			output = append(output, message)
+			continue
 		}
+		classified := classifyToolBlocks(mapsFromSlice(blocks))
+		if len(classified.uses) > 0 || len(classified.serverResults) > 0 {
+			return nil, errors.New("user 消息不能包含 tool_use")
+		}
+		if len(classified.clientResults) > 0 {
+			if err := ledger.consumeResults(classified.clientResults); err != nil {
+				return nil, err
+			}
+			for _, result := range classified.clientResults {
+				output = append(output, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": resultID(result), "content": toolResultText(result["content"])}}})
+			}
+			if text := textFromContent(content); text != "" {
+				output = append(output, map[string]any{"role": "user", "content": text})
+			}
+			continue
+		}
+		if ledger.hasPending() {
+			return nil, errors.New("tool_calls 后缺少 tool message")
+		}
+		output = append(output, message)
 	}
-	return output
+	if err := ledger.requireComplete(); err != nil {
+		return nil, err
+	}
+	return output, nil
 }
 
 func anthropicTools(tools []any) []any {
@@ -1105,16 +1373,66 @@ func toolResultText(value any) string {
 	bytes, _ := json.Marshal(valueOr(value, ""))
 	return string(bytes)
 }
-func toolBlocks(blocks []map[string]any) (uses, results []map[string]any) {
+
+type classifiedToolBlocks struct {
+	uses, results             []map[string]any
+	clientUses, clientResults []map[string]any
+	serverUses, serverResults []map[string]any
+}
+
+func classifyToolBlocks(blocks []map[string]any) classifiedToolBlocks {
+	var output classifiedToolBlocks
 	for _, block := range blocks {
 		switch stringValue(block["type"]) {
-		case "tool_use", "server_tool_use":
-			uses = append(uses, block)
-		case "tool_result", "web_search_tool_result", "web_fetch_tool_result":
-			results = append(results, block)
+		case "tool_use":
+			output.uses = append(output.uses, block)
+			output.clientUses = append(output.clientUses, block)
+		case "tool_result":
+			output.results = append(output.results, block)
+			output.clientResults = append(output.clientResults, block)
+		case "server_tool_use":
+			output.uses = append(output.uses, block)
+			output.serverUses = append(output.serverUses, block)
+		case "web_search_tool_result", "web_fetch_tool_result":
+			output.results = append(output.results, block)
+			output.serverResults = append(output.serverResults, block)
 		}
 	}
-	return
+	return output
+}
+
+func validateServerResults(uses, results []map[string]any) error {
+	if len(results) == 0 {
+		return nil
+	}
+	ids := make(map[string]struct{}, len(uses))
+	for _, use := range uses {
+		id := stringValue(use["id"])
+		if id == "" {
+			return errors.New("server_tool_use 缺少 id")
+		}
+		ids[id] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		id := resultID(result)
+		if id == "" {
+			return errors.New("server tool_result 缺少 tool_use_id")
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("server tool_result id 重复：%s", id)
+		}
+		if _, exists := ids[id]; !exists {
+			return fmt.Errorf("server tool_result 未匹配 server_tool_use：%s", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+func toolBlocks(blocks []map[string]any) (uses, results []map[string]any) {
+	classified := classifyToolBlocks(blocks)
+	return classified.uses, classified.results
 }
 func upstreamToolName(name string, aliases map[string]string) string {
 	if alias := aliases[name]; alias != "" {

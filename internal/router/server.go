@@ -399,6 +399,11 @@ func (server *Server) proxy(response http.ResponseWriter, request *http.Request,
 	}
 	upstream, err := ProxyMessages(ProxyRequest{Model: model, UpstreamModel: route.Model.UpstreamModel, ProviderID: route.Model.Provider, SessionID: session.ID, Protocol: route.Protocol, AllowFast: route.Model.Fast != nil && *route.Model.Fast, ForceStreaming: route.Model.Provider == "opencode-go", Body: body, Headers: request.Header.Clone(), Context: request.Context()}, route.Provider, server.options.Client)
 	if err != nil {
+		var conversionErr *RequestConversionError
+		if errors.As(err, &conversionErr) {
+			jsonResponse(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
 		jsonResponse(response, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
