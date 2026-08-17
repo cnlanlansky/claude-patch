@@ -754,12 +754,110 @@ func TestProviderReasoningPolicyIsolated(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s prepare 失败：%v", providerID, err)
 		}
+		if providerID == "opencode-go" {
+			if !prepared.PreserveReasoningContent {
+				t.Fatalf("%s 未启用 reasoning policy", providerID)
+			}
+			assistant := mapValue(first(sliceValue(prepared.Payload["messages"])))
+			if assistant["reasoning_content"] != "内部推理" {
+				t.Fatalf("%s 未注入 reasoning_content：%v", providerID, assistant)
+			}
+			continue
+		}
 		if prepared.PreserveReasoningContent {
 			t.Fatalf("%s 意外启用 reasoning policy", providerID)
 		}
 		assistant := mapValue(first(sliceValue(prepared.Payload["messages"])))
 		if _, exists := assistant["reasoning_content"]; exists {
 			t.Fatalf("%s 意外注入 reasoning_content：%v", providerID, assistant)
+		}
+	}
+}
+
+func TestOpenCodeGoChatReasoningRoundTrip(t *testing.T) {
+	var requests []map[string]any
+	client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		response.Header().Set("Content-Type", "application/json")
+		if len(requests) == 1 {
+			_, _ = io.WriteString(response, `{"id":"go-chat-1","choices":[{"message":{"reasoning_content":"Go 思考","content":"Go 答案"},"finish_reason":"stop"}]}`)
+			return
+		}
+		_, _ = io.WriteString(response, `{"id":"go-chat-2","choices":[{"message":{"content":"继续"},"finish_reason":"stop"}]}`)
+	}))
+	provider := config.Provider{Label: "OpenCode Go", BaseURL: "https://provider.invalid/zen/go/v1", Protocol: config.OpenAIResponses, Auth: config.AuthBearer, APIKey: "fake-key"}
+	first, err := ProxyMessages(ProxyRequest{
+		Model: "router-model", UpstreamModel: "deepseek-v4-flash", ProviderID: "opencode-go", Protocol: config.OpenAIChat,
+		Body: map[string]any{"messages": []any{map[string]any{"role": "user", "content": "开始"}}, "stream": false},
+	}, provider, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(first.Body, &output); err != nil {
+		t.Fatal(err)
+	}
+	content := sliceValue(output["content"])
+	if len(content) != 2 || mapValue(content[0])["type"] != "thinking" || mapValue(content[1])["text"] != "Go 答案" {
+		t.Fatalf("OpenCode Go 未返回 thinking：%s", first.Body)
+	}
+	_, err = ProxyMessages(ProxyRequest{
+		Model: "router-model", UpstreamModel: "deepseek-v4-flash", ProviderID: "opencode-go", Protocol: config.OpenAIChat,
+		Body: map[string]any{"messages": []any{
+			map[string]any{"role": "user", "content": "开始"},
+			map[string]any{"role": "assistant", "content": content},
+			map[string]any{"role": "user", "content": "继续"},
+		}, "stream": false},
+	}, provider, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || mapValue(sliceValue(requests[1]["messages"])[1])["reasoning_content"] != "Go 思考" {
+		t.Fatalf("OpenCode Go 第二轮未回传 reasoning_content：%v", requests)
+	}
+}
+
+func TestOpenCodeGoChatReasoningStream(t *testing.T) {
+	client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, strings.Join([]string{
+			`data: {"id":"go-stream","choices":[{"delta":{"reasoning_content":"Go 思"},"finish_reason":null}]}`,
+			"", `data: {"id":"go-stream","choices":[{"delta":{"reasoning_content":"考"},"finish_reason":null}]}`,
+			"", `data: {"id":"go-stream","choices":[{"delta":{"content":"Go 文本"},"finish_reason":"stop"}]}`,
+			"", "data: [DONE]", "",
+		}, "\n"))
+	}))
+	provider := config.Provider{Label: "OpenCode Go", BaseURL: "https://provider.invalid/zen/go/v1", Protocol: config.OpenAIResponses, Auth: config.AuthBearer, APIKey: "fake-key"}
+	result, err := ProxyMessages(ProxyRequest{
+		Model: "router-model", UpstreamModel: "deepseek-v4-flash", ProviderID: "opencode-go", Protocol: config.OpenAIChat,
+		Body: map[string]any{"messages": []any{map[string]any{"role": "user", "content": "开始"}}, "stream": false},
+	}, provider, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(result.Body, &output); err != nil {
+		t.Fatal(err)
+	}
+	content := sliceValue(output["content"])
+	if len(content) != 2 || mapValue(content[0])["thinking"] != "Go 思考" || mapValue(content[1])["text"] != "Go 文本" {
+		t.Fatalf("OpenCode Go SSE reasoning 错误：%s", result.Body)
+	}
+}
+
+func TestOpenCodeGoNonChatReasoningPolicyRemainsDisabled(t *testing.T) {
+	body := map[string]any{"messages": []any{map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "thinking", "thinking": "不应注入"}}}}}
+	for _, protocol := range []config.Protocol{config.OpenAIResponses, config.AnthropicMessages} {
+		prepared, err := providerAdapterFor("opencode-go").prepare(ProxyRequest{ProviderID: "opencode-go", Protocol: protocol, Body: body}, config.Provider{BaseURL: "https://provider.invalid/zen/go/v1", Protocol: config.OpenAIResponses}, "model", false)
+		if err != nil {
+			t.Fatalf("%s prepare 失败：%v", protocol, err)
+		}
+		if prepared.PreserveReasoningContent {
+			t.Fatalf("%s 意外启用 reasoning policy", protocol)
 		}
 	}
 }

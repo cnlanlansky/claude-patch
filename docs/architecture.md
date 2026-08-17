@@ -28,7 +28,7 @@ Claude 原生模型 ─────────────────▶ Anthr
 claude-router/... 项目模型 ──────▶ 当前 session 的 127.0.0.1 Router ──────▶ Provider
 ```
 
-Router 用完整模型 ID 查找模型与 Provider。`enabled: false` 或 Provider 未配置时，模型同时从 picker、`/v1/models` 和消息路由移除。除 `opencode-free` 可在 `auth: none` 下免 Key 外，Provider 必须同时具备有效 HTTP(S) URL 和非占位 Key 才算已配置。协议适配支持 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses，并保留 tool call/result、SSE、usage、stop reason、Fast 和 server WebSearch 语义。请求进入独立的 Sub2API、OpenCode Free、OpenCode Go 或通用 Provider 适配器；适配器只处理上游特有的路径、认证、身份 Header、工具别名和 streaming 策略，协议转换、tool ledger、响应归一化与 Anthropic WebSearch 结果 schema 位于共享层。模型级 `protocol` 覆盖始终使用最终路由协议，不会被 Provider 适配器改回默认协议。
+Router 用完整模型 ID 查找模型与 Provider。`enabled: false` 或 Provider 未配置时，模型同时从 picker、`/v1/models` 和消息路由移除。除 `opencode-free` 可在 `auth: none` 下免 Key 外，Provider 必须同时具备有效 HTTP(S) URL 和非占位 Key 才算已配置。协议适配支持 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses，并保留 tool call/result、SSE、usage、stop reason、Fast 和 server WebSearch 语义。请求进入独立的 Sub2API、OpenCode Free、OpenCode Go 或通用 Provider 适配器；适配器只处理上游特有的路径、认证、身份 Header、工具别名、streaming 策略和 reasoning policy，协议转换、tool ledger、响应归一化与 Anthropic WebSearch 结果 schema 位于共享层。OpenCode Free 与 OpenCode Go 的 OpenAI Chat 路径会往返无签名的 `reasoning_content`/`thinking`；其他 Provider 或协议不启用该策略，带签名或 `redacted_thinking` 的跨协议历史会明确失败。模型级 `protocol` 覆盖始终使用最终路由协议，不会被 Provider 适配器改回默认协议。
 
 Provider 非 2xx 状态与正文不自动重试、翻译、换模型或降级。Anthropic 原样响应逐块转发并传播请求取消；需要协议聚合或 server Web Search 的响应才会在 16 MiB 上限内缓冲。`count_tokens` 透明转发给对应 Provider，不伪造 token 数。Hop-by-hop 与编码/长度响应头由本地 HTTP server 重建，其余上游响应头透传。
 

@@ -368,7 +368,7 @@ Claude Code 2.1.233 的原生 `/fast` 会在不支持模型上于 HTTP 请求之
 - messages 与多种 content block；
 - tool definitions、`tool_choice`；
 - `tool_use`、`tool_result` 和 ID 关联；
-- thinking/reasoning block；
+- thinking/reasoning block；OpenCode Free 与 OpenCode Go 的 Chat Completions 使用 `reasoning_content` 与 Anthropic `thinking` 做无签名往返；
 - effort 字段；
 - streaming delta 和事件顺序；
 - usage、stop reason；
@@ -678,7 +678,7 @@ Provider 返回的 HTTP 状态和正文原样传给 Claude Code：
 3. Windows 安全机制、ASLR、CFG、npm 与 Bun 安装来源对新子进程内存适配的实际影响。
 4. `i.bug.pics` 当前账号可见模型、普通/compact effort、`count_tokens` 和 priority。
 5. DeepSeek Anthropic compatibility 的真实 tool/stream/effort 与 `count_tokens` 行为。
-6. 当前默认目录中的 OpenCode Go 5 个、OpenCode Free 3 个模型的真实协议、tool、effort、stream 和错误行为。
+6. 当前默认目录中的 OpenCode Go 5 个、OpenCode Free 3 个模型的真实协议、tool、effort、stream、reasoning 和错误行为。
 7. Claude 原生历史在各服务商之间切换时，哪些私有 block 会实际触发拒绝。
 8. 多命令会话、控制台继承、关闭清理、托盘和两个桌面 toggle 的人工 Windows 验收。
 

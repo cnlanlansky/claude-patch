@@ -12,6 +12,13 @@ type openCodeGoAdapter struct{}
 
 func (openCodeGoAdapter) prepare(request ProxyRequest, provider config.Provider, model string, fast bool) (preparedUpstream, error) {
 	aliases := responseToolAliases(provider, request.Protocol, request.Body)
+	if request.Protocol == config.OpenAIChat {
+		payload, err := toChatRequestWithReasoning(request.Body, model, fast, true, aliases, true)
+		if err != nil {
+			return preparedUpstream{}, err
+		}
+		return preparedUpstream{Payload: payload, Path: "/v1/chat/completions", Aliases: aliases, PreserveReasoningContent: true}, nil
+	}
 	normalizeTools := request.Protocol == config.AnthropicMessages && isOpenCodeGo(provider.BaseURL)
 	payload, path, err := prepareProtocolRequest(request.Body, request.Protocol, model, fast, true, normalizeTools, aliases)
 	if err != nil {
