@@ -9,10 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -42,19 +40,7 @@ type ProxyRequest struct {
 	Body           map[string]any
 	Headers        http.Header
 	Context        context.Context
-	WebSearch      func(context.Context, string, SearchOptions) ([]SearchResult, error)
-}
-
-type SearchOptions struct {
-	AllowedDomains []string
-	BlockedDomains []string
-	NumResults     int
-}
-
-type SearchResult struct {
-	Title   string `json:"title"`
-	URL     string `json:"url"`
-	Snippet string `json:"snippet,omitempty"`
+	WebSearch      SearchExecutor
 }
 
 type NormalizedToolCall struct {
@@ -93,24 +79,14 @@ func ProxyMessages(request ProxyRequest, provider config.Provider, client *http.
 	if protocol == "" {
 		protocol = provider.Protocol
 	}
+	request.Protocol = protocol
 	upstreamModel := request.UpstreamModel
 	if upstreamModel == "" {
 		upstreamModel = request.Model
 	}
-	aliases := responseToolAliases(provider, protocol, request.Body)
 	fast := request.AllowFast && stringValue(request.Body["speed"]) == "fast"
-	var payload map[string]any
-	var err error
-	path := "/v1/messages"
-	if protocol == config.OpenAIChat {
-		payload, err = toChatRequest(request.Body, upstreamModel, fast, request.ForceStreaming, aliases)
-		path = "/v1/chat/completions"
-	} else if protocol == config.OpenAIResponses {
-		payload, err = toResponsesRequest(request.Body, upstreamModel, fast, request.ForceStreaming, aliases)
-		path = "/v1/responses"
-	} else {
-		payload, err = anthropicBody(request.Body, upstreamModel, fast, isOpenCodeGo(provider.BaseURL))
-	}
+	adapter := providerAdapterFor(request.ProviderID)
+	prepared, err := adapter.prepare(request, provider, upstreamModel, fast)
 	if err != nil {
 		var conversionErr *RequestConversionError
 		if errors.As(err, &conversionErr) {
@@ -118,7 +94,7 @@ func ProxyMessages(request ProxyRequest, provider config.Provider, client *http.
 		}
 		return nil, &RequestConversionError{Err: err}
 	}
-	payloadBytes, err := json.Marshal(payload)
+	payloadBytes, err := json.Marshal(prepared.Payload)
 	if err != nil {
 		return nil, err
 	}
@@ -126,11 +102,11 @@ func ProxyMessages(request ProxyRequest, provider config.Provider, client *http.
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL(provider.BaseURL, path), bytes.NewReader(payloadBytes))
+	upstream, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL(provider.BaseURL, prepared.Path), bytes.NewReader(payloadBytes))
 	if err != nil {
 		return nil, err
 	}
-	upstream.Header = upstreamHeaders(provider, request.Headers, fast, protocol, request.ProviderID, request.SessionID)
+	upstream.Header = adapter.headers(provider, request.Headers, fast, protocol, request.ProviderID, request.SessionID)
 	response, err := client.Do(upstream)
 	if err != nil {
 		return nil, err
@@ -150,7 +126,7 @@ func ProxyMessages(request ProxyRequest, provider config.Provider, client *http.
 		return nil, errors.New("upstream response body too large")
 	}
 	result.Body = raw
-	normalized, err := normalizeUpstream(raw, response.Header.Get("content-type"), protocol, aliases)
+	normalized, err := normalizeUpstream(raw, response.Header.Get("content-type"), protocol, prepared.Aliases)
 	if err != nil {
 		return result, nil
 	}
@@ -176,72 +152,12 @@ func ProxyMessages(request ProxyRequest, provider config.Provider, client *http.
 	return result, nil
 }
 
-func upstreamHeaders(provider config.Provider, incoming http.Header, fast bool, protocol config.Protocol, providerID, sessionID string) http.Header {
-	headers := incoming.Clone()
-	if headers == nil {
-		headers = make(http.Header)
-	}
-	for _, name := range []string{"Host", "Content-Length", "X-Api-Key", "Authorization"} {
-		headers.Del(name)
-	}
-	if !fast {
-		values := splitHeader(headers.Get("Anthropic-Beta"))
-		filtered := values[:0]
-		for _, value := range values {
-			if value != "fast-mode-2026-02-01" {
-				filtered = append(filtered, value)
-			}
-		}
-		if len(filtered) > 0 {
-			headers.Set("Anthropic-Beta", strings.Join(filtered, ","))
-		} else {
-			headers.Del("Anthropic-Beta")
-		}
-	}
-	openCodeGoAnthropic := protocol == config.AnthropicMessages && isOpenCodeGo(provider.BaseURL)
-	openCodeFree := providerID == "opencode-free" && isOpenCodeFree(provider.BaseURL) && protocol == config.OpenAIChat
-	if openCodeFree {
-		for _, name := range []string{"X-Opencode-Client", "X-Opencode-Project", "X-Opencode-Request", "X-Opencode-Session", "X-Session-Affinity", "X-Session-Id"} {
-			headers.Del(name)
-		}
-		headers.Set("User-Agent", "opencode/1.18.18 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
-		headers.Set("X-Opencode-Client", "cli")
-		headers.Set("X-Opencode-Project", "global")
-		headers.Set("X-Opencode-Request", "msg_"+randomHex(16))
-		clean := strings.ReplaceAll(sessionID, "-", "")
-		if clean == "" {
-			clean = randomHex(16)
-		}
-		if !strings.HasPrefix(clean, "ses_") {
-			clean = "ses_" + clean
-		}
-		headers.Set("X-Opencode-Session", clean)
-	}
-	if provider.Auth == config.AuthAPIKey || openCodeGoAnthropic {
-		headers.Set("X-Api-Key", provider.APIKey)
-	} else if provider.Auth == config.AuthBearer {
-		headers.Set("Authorization", "Bearer "+provider.APIKey)
-	}
-	headers.Set("Content-Type", "application/json")
-	return headers
-}
-
 func upstreamURL(base, path string) string {
 	base = strings.TrimRight(base, "/")
 	if strings.HasSuffix(base, "/v1") && strings.HasPrefix(path, "/v1/") {
 		return base + strings.TrimPrefix(path, "/v1")
 	}
 	return base + path
-}
-
-func isOpenCodeGo(base string) bool {
-	parsed, err := url.Parse(strings.TrimRight(base, "/"))
-	return err == nil && strings.EqualFold(parsed.Hostname(), "opencode.ai") && parsed.Path == "/zen/go/v1"
-}
-
-func isOpenCodeFree(base string) bool {
-	parsed, err := url.Parse(strings.TrimRight(base, "/"))
-	return err == nil && strings.EqualFold(parsed.Hostname(), "opencode.ai") && parsed.Path == "/zen/v1"
 }
 
 func anthropicBody(body map[string]any, model string, allowFast, normalizeTools bool) (map[string]any, error) {
@@ -780,30 +696,6 @@ func toolChoice(body map[string]any, responses bool, aliases map[string]string) 
 	return nil
 }
 
-func responseToolAliases(provider config.Provider, protocol config.Protocol, body map[string]any) map[string]string {
-	aliases := map[string]string{}
-	if protocol != config.OpenAIResponses || !isOpenCodeGo(provider.BaseURL) {
-		return aliases
-	}
-	names := map[string]bool{}
-	for _, raw := range sliceValue(body["tools"]) {
-		names[stringValue(mapValue(raw)["name"])] = true
-	}
-	for _, raw := range sliceValue(body["tools"]) {
-		tool := mapValue(raw)
-		if stringValue(tool["name"]) != "web_search" || !strings.HasPrefix(stringValue(tool["type"]), "web_search_") {
-			continue
-		}
-		alias := "web_search_tool"
-		for names[alias] {
-			alias = "claude_" + alias
-		}
-		aliases["web_search"] = alias
-		names[alias] = true
-	}
-	return aliases
-}
-
 func normalizeUpstream(raw []byte, contentType string, protocol config.Protocol, aliases map[string]string) (NormalizedResponse, error) {
 	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
 		if protocol == config.AnthropicMessages {
@@ -1005,34 +897,6 @@ func normalizeAnthropicStream(raw []byte) NormalizedResponse {
 	return normalized
 }
 
-type searchResolution struct {
-	ID, Error string
-	Input     map[string]any
-	Results   []SearchResult
-}
-
-func resolveSearches(ctx context.Context, normalized NormalizedResponse, executor func(context.Context, string, SearchOptions) ([]SearchResult, error)) []searchResolution {
-	var output []searchResolution
-	if executor == nil {
-		executor = SearchWeb
-	}
-	for _, tool := range normalized.Tools {
-		if !tool.ServerTool {
-			continue
-		}
-		var input map[string]any
-		_ = json.Unmarshal([]byte(tool.Arguments), &input)
-		options := SearchOptions{AllowedDomains: stringsFrom(input["allowed_domains"]), BlockedDomains: stringsFrom(input["blocked_domains"]), NumResults: int(numberValue(input["numResults"]))}
-		results, err := executor(ctx, stringValue(input["query"]), options)
-		resolution := searchResolution{ID: tool.ID, Input: input, Results: results}
-		if err != nil {
-			resolution.Error = err.Error()
-		}
-		output = append(output, resolution)
-	}
-	return output
-}
-
 func anthropicResponse(normalized NormalizedResponse, model string, searches []searchResolution) map[string]any {
 	var content []any
 	if normalized.Text != "" {
@@ -1050,9 +914,11 @@ func anthropicResponse(normalized NormalizedResponse, model string, searches []s
 			content = append(content, map[string]any{"type": "server_tool_use", "id": tool.ID, "name": "web_search", "input": input})
 			var result any
 			if search.Error != "" {
-				result = map[string]any{"error_code": "search_error"}
+				result = map[string]any{"type": "web_search_tool_result_error", "error_code": search.ErrorCode}
+			} else if search.SearchResultContent != nil {
+				result = search.SearchResultContent
 			} else {
-				result = search.Results
+				result = []any{}
 			}
 			content = append(content, map[string]any{"type": "web_search_tool_result", "tool_use_id": tool.ID, "content": result})
 		} else {
@@ -1138,102 +1004,6 @@ func parseSSE(raw []byte) []sseFrame {
 func writeSSE(output *bytes.Buffer, event string, value any) {
 	data, _ := json.Marshal(value)
 	fmt.Fprintf(output, "event: %s\ndata: %s\n\n", event, data)
-}
-
-func SearchWeb(ctx context.Context, query string, options SearchOptions) ([]SearchResult, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return nil, nil
-	}
-	if len(query) > 2048 {
-		return nil, errors.New("web search query too long")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://html.duckduckgo.com/html/?q="+url.QueryEscape(query), nil)
-	request.Header.Set("User-Agent", "Mozilla/5.0 (Claude Patch)")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("search upstream returned HTTP %d", response.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, 4*1024*1024+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(body) > 4*1024*1024 {
-		return nil, errors.New("web search response too large")
-	}
-	return parseSearchHTML(string(body), options), nil
-}
-
-var resultLink = regexp.MustCompile(`(?is)<a\b([^>]*\bclass=["'][^"']*\bresult__a\b[^"']*[^>]*)>(.*?)</a>`)
-var resultSnippet = regexp.MustCompile(`(?is)<a\b[^>]*\bclass=["'][^"']*\bresult__snippet\b[^"']*["'][^>]*>(.*?)</a>`)
-var hrefAttr = regexp.MustCompile(`(?i)\bhref=["']([^"']+)["']`)
-var htmlTag = regexp.MustCompile(`<[^>]*>`)
-
-func parseSearchHTML(body string, options SearchOptions) []SearchResult {
-	limit := options.NumResults
-	if limit <= 0 {
-		limit = 8
-	}
-	if limit > 20 {
-		limit = 20
-	}
-	snippetMatches := resultSnippet.FindAllStringSubmatch(body, -1)
-	snippets := make([]string, len(snippetMatches))
-	for index, match := range snippetMatches {
-		snippets[index] = cleanHTML(match[1])
-	}
-	var output []SearchResult
-	for _, match := range resultLink.FindAllStringSubmatch(body, -1) {
-		href := hrefAttr.FindStringSubmatch(match[1])
-		if len(href) < 2 {
-			continue
-		}
-		parsed, err := url.Parse(href[1])
-		if err != nil {
-			continue
-		}
-		if redirect := parsed.Query().Get("uddg"); redirect != "" {
-			parsed, err = url.Parse(redirect)
-			if err != nil {
-				continue
-			}
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" || domainMatch(parsed, options.BlockedDomains) || len(options.AllowedDomains) > 0 && !domainMatch(parsed, options.AllowedDomains) {
-			continue
-		}
-		title := cleanHTML(match[2])
-		if title == "" {
-			continue
-		}
-		result := SearchResult{Title: title, URL: parsed.String()}
-		if len(output) < len(snippets) {
-			result.Snippet = snippets[len(output)]
-		}
-		output = append(output, result)
-		if len(output) >= limit {
-			break
-		}
-	}
-	return output
-}
-func cleanHTML(value string) string {
-	return strings.Join(strings.Fields(html.UnescapeString(htmlTag.ReplaceAllString(value, " "))), " ")
-}
-func domainMatch(value *url.URL, domains []string) bool {
-	host := strings.ToLower(value.Hostname())
-	for _, domain := range domains {
-		domain = strings.TrimLeft(strings.ToLower(strings.TrimSpace(domain)), ".")
-		if domain != "" && (host == domain || strings.HasSuffix(host, "."+domain)) {
-			return true
-		}
-	}
-	return false
 }
 
 func randomHex(size int) string {

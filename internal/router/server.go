@@ -365,7 +365,7 @@ func (server *Server) proxyCountTokens(response http.ResponseWriter, request *ht
 		jsonResponse(response, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
-	upstream.Header = upstreamHeaders(route.Provider, request.Header, false, route.Protocol, route.Model.Provider, "")
+	upstream.Header = providerAdapterFor(route.Model.Provider).headers(route.Provider, request.Header, false, route.Protocol, route.Model.Provider, "")
 	client := server.options.Client
 	if client == nil {
 		client = &http.Client{Timeout: time.Hour}
@@ -397,7 +397,7 @@ func (server *Server) proxy(response http.ResponseWriter, request *http.Request,
 		jsonResponse(response, http.StatusNotFound, map[string]any{"error": "model_not_found"})
 		return
 	}
-	upstream, err := ProxyMessages(ProxyRequest{Model: model, UpstreamModel: route.Model.UpstreamModel, ProviderID: route.Model.Provider, SessionID: session.ID, Protocol: route.Protocol, AllowFast: route.Model.Fast != nil && *route.Model.Fast, ForceStreaming: route.Model.Provider == "opencode-go", Body: body, Headers: request.Header.Clone(), Context: request.Context()}, route.Provider, server.options.Client)
+	upstream, err := ProxyMessages(ProxyRequest{Model: model, UpstreamModel: route.Model.UpstreamModel, ProviderID: route.Model.Provider, SessionID: session.ID, Protocol: route.Protocol, AllowFast: route.Model.Fast != nil && *route.Model.Fast, Body: body, Headers: request.Header.Clone(), Context: request.Context()}, route.Provider, server.options.Client)
 	if err != nil {
 		var conversionErr *RequestConversionError
 		if errors.As(err, &conversionErr) {

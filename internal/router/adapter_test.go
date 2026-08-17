@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -104,7 +105,7 @@ func TestProxyMessagesProtocolsHeadersAndFast(t *testing.T) {
 
 func TestOpenCodeIdentityHeadersRequireOfficialHost(t *testing.T) {
 	provider := config.Provider{Label: "Fake", BaseURL: "https://attacker.invalid/zen/v1", Protocol: config.OpenAIChat, Auth: config.AuthNone}
-	headers := upstreamHeaders(provider, nil, false, config.OpenAIChat, "opencode-free", "session")
+	headers := providerAdapterFor("opencode-free").headers(provider, nil, false, config.OpenAIChat, "opencode-free", "session")
 	if headers.Get("X-Opencode-Client") != "" {
 		t.Fatalf("非官方 host 获得 OpenCode 身份头：%v", headers)
 	}
@@ -151,7 +152,7 @@ func TestProxyMessagesToolsAliasesAndErrors(t *testing.T) {
 	}))
 	provider := config.Provider{Label: "OpenCode Go", BaseURL: "https://opencode.ai/zen/go/v1", Protocol: config.OpenAIResponses, Auth: config.AuthBearer, APIKey: "secret"}
 	result, err := ProxyMessages(ProxyRequest{
-		Model: "router-model", Protocol: config.OpenAIResponses, ForceStreaming: true,
+		Model: "router-model", ProviderID: "opencode-go", Protocol: config.OpenAIResponses, ForceStreaming: true,
 		Body: map[string]any{
 			"messages": []any{}, "stream": false,
 			"tools": []any{map[string]any{"type": "web_search_20250305", "name": "web_search", "input_schema": nil}},
@@ -172,6 +173,10 @@ func TestProxyMessagesToolsAliasesAndErrors(t *testing.T) {
 	if len(content) != 2 || mapValue(content[0])["name"] != "web_search" || mapValue(content[1])["type"] != "web_search_tool_result" {
 		t.Fatalf("server search response 错误：%s", result.Body)
 	}
+	searchContent := sliceValue(mapValue(content[1])["content"])
+	if len(searchContent) != 1 || mapValue(searchContent[0])["type"] != "web_search_result" || mapValue(searchContent[0])["title"] != "广州天气" {
+		t.Fatalf("搜索结果 block schema 错误：%s", result.Body)
+	}
 	_, err = ProxyMessages(ProxyRequest{Body: map[string]any{}}, config.Provider{Label: "Missing", BaseURL: "https://provider.invalid", Protocol: config.AnthropicMessages, Auth: config.AuthBearer}, client)
 	if err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("缺少 API key 未失败：%v", err)
@@ -189,7 +194,7 @@ func TestOpenCodeGoAnthropicAuthenticationAndServerToolNormalization(t *testing.
 	}))
 	provider := config.Provider{Label: "OpenCode Go", BaseURL: "https://opencode.ai/zen/go/v1", Protocol: config.AnthropicMessages, Auth: config.AuthBearer, APIKey: "provider-secret"}
 	result, err := ProxyMessages(ProxyRequest{
-		Model: "router-model", UpstreamModel: "upstream-model", Protocol: config.AnthropicMessages,
+		Model: "router-model", UpstreamModel: "upstream-model", ProviderID: "opencode-go", Protocol: config.AnthropicMessages,
 		Body: map[string]any{
 			"messages":    []any{map[string]any{"role": "user", "content": "search"}},
 			"tools":       []any{map[string]any{"type": "web_search_20250305", "name": "web_search", "input_schema": nil}, map[string]any{"name": "regular", "input_schema": emptyToolSchema()}},
@@ -260,6 +265,153 @@ func TestOpenAIToolSchemasDescriptionsAndConversationLinks(t *testing.T) {
 	input := sliceValue(responses["input"])
 	if len(input) != 2 || mapValue(input[0])["type"] != "function_call" || mapValue(input[1])["type"] != "function_call_output" || mapValue(input[1])["call_id"] != "call-search" || mapValue(input[1])["output"] != "sunny" {
 		t.Fatalf("Responses tool result 关系错误：%v", input)
+	}
+}
+
+func TestProviderAdaptersKeepUpstreamPoliciesIsolated(t *testing.T) {
+	capture := func(t *testing.T, request ProxyRequest, provider config.Provider) (http.Header, map[string]any) {
+		t.Helper()
+		var captured http.Header
+		var body map[string]any
+		client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			captured = request.Header.Clone()
+			_ = json.NewDecoder(request.Body).Decode(&body)
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"id":"response-1","output":[]}`)
+		}))
+		if _, err := ProxyMessages(request, provider, client); err != nil {
+			t.Fatal(err)
+		}
+		return captured, body
+	}
+
+	subHeaders, _ := capture(t, ProxyRequest{
+		Model: "router-model", ProviderID: "sub2api", Protocol: config.AnthropicMessages,
+		Body: map[string]any{"messages": []any{}, "stream": false},
+	}, config.Provider{Label: "Sub2API", BaseURL: "https://opencode.ai/zen/go/v1", Protocol: config.AnthropicMessages, Auth: config.AuthBearer, APIKey: "sub-secret"})
+	if subHeaders.Get("X-Opencode-Client") != "" || subHeaders.Get("X-Api-Key") != "" || subHeaders.Get("Authorization") != "Bearer sub-secret" {
+		t.Fatalf("Sub2API 泄漏 OpenCode 认证策略：%v", subHeaders)
+	}
+
+	freeHeaders, freeBody := capture(t, ProxyRequest{
+		Model: "router-model", ProviderID: "opencode-free", Protocol: config.OpenAIChat,
+		SessionID: "session-free", Body: map[string]any{
+			"messages": []any{}, "stream": false,
+			"tools": []any{map[string]any{"type": "web_search_20250305", "name": "web_search"}},
+		},
+	}, config.Provider{Label: "OpenCode Free", BaseURL: "https://opencode.ai/zen/v1", Protocol: config.OpenAIChat, Auth: config.AuthNone})
+	freeTools := sliceValue(freeBody["tools"])
+	freeFunction := mapValue(mapValue(first(freeTools))["function"])
+	if freeHeaders.Get("X-Opencode-Client") != "cli" || freeHeaders.Get("X-Api-Key") != "" || stringValue(freeFunction["name"]) != "web_search" {
+		t.Fatalf("OpenCode Free 策略错误或混入 Go alias：%v %v", freeHeaders, freeBody)
+	}
+
+	goHeaders, goBody := capture(t, ProxyRequest{
+		Model: "router-model", ProviderID: "opencode-go", Protocol: config.OpenAIResponses,
+		Body: map[string]any{
+			"messages": []any{}, "stream": false,
+			"tools": []any{map[string]any{"type": "web_search_20250305", "name": "web_search"}},
+		},
+	}, config.Provider{Label: "OpenCode Go", BaseURL: "https://opencode.ai/zen/go/v1", Protocol: config.OpenAIResponses, Auth: config.AuthBearer, APIKey: "go-secret"})
+	goTools := sliceValue(goBody["tools"])
+	goFunction := mapValue(first(goTools))
+	if goHeaders.Get("X-Opencode-Client") != "" || goHeaders.Get("Authorization") != "Bearer go-secret" || stringValue(goFunction["name"]) != "web_search_tool" || goBody["stream"] != true {
+		t.Fatalf("OpenCode Go 策略错误：%v %v", goHeaders, goBody)
+	}
+}
+
+func TestServerSearchEmptyResultsAreArraysAcrossProtocols(t *testing.T) {
+	tests := []struct {
+		name, protocol, response string
+	}{
+		{name: "sub2api-anthropic", protocol: string(config.AnthropicMessages), response: `{"id":"message-1","content":[{"type":"tool_use","id":"search-1","name":"web_search","input":{"query":"OpenAI"}}]}`},
+		{name: "opencode-free-chat", protocol: string(config.OpenAIChat), response: `{"id":"chat-1","choices":[{"message":{"tool_calls":[{"id":"search-1","function":{"name":"web_search","arguments":"{\"query\":\"OpenAI\"}"}}]},"finish_reason":"tool_calls"}]}`},
+		{name: "opencode-go-responses", protocol: string(config.OpenAIResponses), response: `{"id":"response-1","output":[{"type":"function_call","call_id":"search-1","name":"web_search","arguments":"{\"query\":\"OpenAI\"}"}]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(response, test.response)
+			}))
+			providerID := "sub2api"
+			if test.name == "opencode-free-chat" {
+				providerID = "opencode-free"
+			} else if test.name == "opencode-go-responses" {
+				providerID = "opencode-go"
+			}
+			result, err := ProxyMessages(ProxyRequest{
+				Model: "router-model", ProviderID: providerID, Protocol: config.Protocol(test.protocol),
+				Body: map[string]any{"messages": []any{}, "stream": false, "tools": []any{map[string]any{"type": "web_search_20250305", "name": "web_search"}}},
+				WebSearch: func(context.Context, string, SearchOptions) ([]SearchResult, error) {
+					return nil, nil
+				},
+			}, config.Provider{Label: test.name, BaseURL: "https://provider.invalid", Protocol: config.Protocol(test.protocol), Auth: config.AuthNone}, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output map[string]any
+			if err := json.Unmarshal(result.Body, &output); err != nil {
+				t.Fatal(err)
+			}
+			content := sliceValue(output["content"])
+			if len(content) != 2 {
+				t.Fatalf("搜索响应 block 数量错误：%s", result.Body)
+			}
+			searchContent, ok := mapValue(content[1])["content"]
+			if !ok || searchContent == nil || sliceValue(searchContent) == nil || len(sliceValue(searchContent)) != 0 {
+				t.Fatalf("无结果搜索必须返回空数组：%s", result.Body)
+			}
+		})
+	}
+}
+
+func TestSearchErrorCodePreservesTypedCode(t *testing.T) {
+	value := resolveSearches(context.Background(), NormalizedResponse{Tools: []NormalizedToolCall{{ID: "search-1", Name: "web_search", ServerTool: true, Arguments: `{"query":"OpenAI"}`}}}, func(context.Context, string, SearchOptions) ([]SearchResult, error) {
+		return nil, &SearchError{Code: "invalid_tool_input", Err: errors.New("bad query")}
+	})
+	if len(value) != 1 || value[0].ErrorCode != "invalid_tool_input" {
+		t.Fatalf("搜索错误码未保留：%+v", value)
+	}
+}
+
+func TestSearchResultBlocksPreserveAnthropicFields(t *testing.T) {
+	blocks := searchResultBlocks([]SearchResult{{Title: "OpenAI", URL: "https://openai.com/", Snippet: "official", EncryptedContent: "opaque", PageAge: "today"}})
+	if len(blocks) != 1 {
+		t.Fatalf("搜索结果 block 数量错误：%v", blocks)
+	}
+	block := mapValue(blocks[0])
+	if block["type"] != "web_search_result" || block["encrypted_content"] != "opaque" || block["page_age"] != "today" {
+		t.Fatalf("搜索结果字段丢失：%v", block)
+	}
+}
+
+func TestSearchErrorUsesAnthropicErrorShape(t *testing.T) {
+	client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(response, `{"id":"chat-1","choices":[{"message":{"tool_calls":[{"id":"search-1","function":{"name":"web_search","arguments":"{\"query\":\"OpenAI\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	}))
+	result, err := ProxyMessages(ProxyRequest{
+		Model: "router-model", Protocol: config.OpenAIChat,
+		Body: map[string]any{"messages": []any{}, "stream": false, "tools": []any{map[string]any{"type": "web_search_20250305", "name": "web_search"}}},
+		WebSearch: func(context.Context, string, SearchOptions) ([]SearchResult, error) {
+			return nil, errors.New("search upstream returned HTTP 503")
+		},
+	}, config.Provider{Label: "Fake", BaseURL: "https://provider.invalid", Protocol: config.OpenAIChat, Auth: config.AuthNone}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(result.Body, &output); err != nil {
+		t.Fatal(err)
+	}
+	content := sliceValue(output["content"])
+	if len(content) != 2 {
+		t.Fatalf("搜索错误响应 block 数量错误：%s", result.Body)
+	}
+	errorContent := mapValue(mapValue(content[1])["content"])
+	if errorContent["type"] != "web_search_tool_result_error" || errorContent["error_code"] != "unavailable" {
+		t.Fatalf("搜索错误 schema 错误：%s", result.Body)
 	}
 }
 
