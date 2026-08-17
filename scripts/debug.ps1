@@ -7,7 +7,7 @@ $version = $env:CLAUDE_PATCH_VERSION
 if ([string]::IsNullOrWhiteSpace($version)) {
     $tag = $null
     if (Get-Command git -ErrorAction SilentlyContinue) {
-        $tag = (& git describe --tags --exact-match HEAD 2>$null | Select-Object -First 1)
+        $tag = (& git tag --points-at HEAD | Where-Object { $_ -match '^v[0-9]+\.[0-9]+\.[0-9]+$' } | Select-Object -First 1)
     }
     if ($null -ne $tag) {
         $version = ([string]$tag).Trim()
