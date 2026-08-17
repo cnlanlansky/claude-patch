@@ -40,7 +40,7 @@ flowchart TB
     S --> U["Sub2API · DeepSeek · OpenCode"]
 ```
 
-GUI 和 `claude` 命令入口是同一个程序，但职责不同：无参数只管理；`--background` 只在托盘启动管理 Router；`claude [参数...]` 才创建、patch 并等待 Claude child。管理入口为单实例，命令会话不受该限制。
+GUI 和 `claude` 命令入口是同一个程序，但职责不同：无参数只管理；`--background` 只在托盘启动管理 Router；`claude [参数...]` 才创建、patch 并等待 Claude child。管理入口为单实例，命令会话不受该限制。管理程序真正退出时，只终止本工具命令入口主动加入的 Windows Job；不会按 EXE 文件名扫描，因此改名后的本工具仍会被清理，外部 Claude/Router 不受影响。
 
 ## 📦 前置条件
 

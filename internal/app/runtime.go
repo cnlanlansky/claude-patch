@@ -19,6 +19,8 @@ type Runtime struct {
 	Executable string
 	Loaded     config.Loaded
 	Router     *router.Server
+	ownedGroup *OwnedProcessGroup
+	manager    bool
 
 	mu       sync.Mutex
 	sessions map[string]*claude.Session
@@ -28,6 +30,14 @@ type Runtime struct {
 }
 
 func StartRuntime(executable string) (*Runtime, error) {
+	return startRuntime(executable, false)
+}
+
+func StartCommandRuntime(executable string) (*Runtime, error) {
+	return startRuntime(executable, true)
+}
+
+func startRuntime(executable string, command bool) (*Runtime, error) {
 	absolute, err := filepath.Abs(executable)
 	if err != nil {
 		return nil, err
@@ -39,7 +49,17 @@ func StartRuntime(executable string) (*Runtime, error) {
 	if discovery, discoverErr := claude.Discover(loaded.Config.Claude.Executable); discoverErr == nil {
 		loaded.Config.Claude.Executable = discovery.RequestedPath
 	}
-	runtime := &Runtime{Executable: absolute, Loaded: loaded, sessions: make(map[string]*claude.Session)}
+	runtime := &Runtime{Executable: absolute, Loaded: loaded, manager: !command, sessions: make(map[string]*claude.Session)}
+	var group *OwnedProcessGroup
+	if command {
+		group, err = JoinOwnedProcessGroup()
+	} else {
+		group, err = OpenOrCreateOwnedProcessGroup()
+	}
+	if err != nil {
+		return nil, err
+	}
+	runtime.ownedGroup = group
 	status, _ := CommandState(absolute)
 	server, err := router.Start(router.Options{
 		ConfigPath: loaded.Path, ExecutablePath: absolute,
@@ -49,6 +69,9 @@ func StartRuntime(executable string) (*Runtime, error) {
 		OnStopClaude:    runtime.stopSession,
 	})
 	if err != nil {
+		if runtime.ownedGroup != nil {
+			_ = runtime.ownedGroup.Close()
+		}
 		return nil, err
 	}
 	runtime.Router = server
@@ -127,6 +150,12 @@ func (runtime *Runtime) Stop() error {
 		}
 		if runtime.Router != nil {
 			errs = append(errs, runtime.Router.Stop())
+		}
+		if runtime.ownedGroup != nil {
+			if runtime.manager {
+				errs = append(errs, runtime.ownedGroup.Terminate())
+			}
+			errs = append(errs, runtime.ownedGroup.Close())
 		}
 		runtime.stopErr = errors.Join(errs...)
 	})

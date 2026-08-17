@@ -18,7 +18,7 @@ claude-patch.exe
 - 双击无参数入口只打开管理程序，不创建 Claude child；重复启动只显示已有窗口；
 - `--background` 是当前用户开机启动入口，只创建隐藏到托盘的管理程序；
 - GUI 的安装、卸载按钮和两个桌面开关均由用户显式触发，启动时只检测状态；
-- `claude [参数...]` 由命令代理调用，创建一个独立 Router 和一个新 Claude child，不受管理入口单实例限制；
+- `claude [参数...]` 由命令代理调用，创建一个独立 Router 和一个新 Claude child，不受管理入口单实例限制；命令入口启动时加入固定名称的本工具 Windows Job Object，管理入口不加入该 Job；
 - `--self-check` 始终在 resume 前终止候选 child。
 
 ## 请求边界
@@ -79,7 +79,7 @@ Provider 非 2xx 状态与正文不自动重试、翻译、换模型或降级。
 - 一个 kill-on-close Job；
 - 一份内存中的 token 映射。
 
-Runtime 真正退出时，以内存中的 session 所有权快照为准，先幂等停止并关闭本工具创建的全部 Claude child，再停止 Router；Router 注册竞态、命令正常结束、GUI 关闭和托盘明确退出都不能遗漏本工具自有 child。托盘图标不可用时 GUI 不隐藏窗口，避免失去退出入口。不会按进程名、PID 猜测或枚举清理外部 Claude/Router。
+Runtime 真正退出时，以内存中的 session 所有权快照为准，先幂等停止并关闭本工具创建的全部 Claude child，再停止 Router；管理入口随后终止固定名称 Job Object 中的全部本工具命令进程。命令入口正常退出只关闭自己的 Job 句柄，不广播或终止兄弟会话。Job 成员关系不依赖 EXE 文件名，因此用户改名仍可清理；Router 注册竞态、命令正常结束、GUI 关闭和托盘明确退出都不能遗漏本工具自有 child。托盘图标不可用时 GUI 不隐藏窗口，避免失去退出入口。不会按进程名、PID 猜测或枚举清理外部 Claude/Router。
 
 `%TEMP%\claude-router-sessions` 只保存 session ID、Claude PID、startedAt、Router PID 和 Router ID，不保存 token、API key、prompt 或 tool result。其他 Router 可查看活跃元数据，但不能调用或停止不属于自己的 session。
 

@@ -80,7 +80,7 @@ func run(args []string) (uint32, error) {
 }
 
 func runClaude(executable string, args []string) (uint32, error) {
-	runtime, err := app.StartRuntime(executable)
+	runtime, err := app.StartCommandRuntime(executable)
 	if err != nil {
 		return 1, err
 	}

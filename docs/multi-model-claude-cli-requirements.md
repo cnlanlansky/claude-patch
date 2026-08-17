@@ -433,7 +433,7 @@ Claude Code 2.1.233 的原生 `/fast` 会在不支持模型上于 HTTP 请求之
 2. 无参数和 `--background` 管理入口用当前用户命名 mutex 保证单实例；重复普通启动只唤起已有窗口，重复后台启动静默退出；
 3. 每次 `claude [...]` 创建独立命令进程、进程内 Router、随机端口/session token 和一个 suspended Claude child，不受管理入口单实例限制；
 4. Claude child 加入 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` Job；命令进程异常退出或关闭 Job 时，Windows 终止其 child；
-5. 命令正常结束、GUI 真正退出或托盘明确退出时，Runtime 先停止并关闭自己创建的全部 Claude child，再停止 Router；重复 Stop 幂等，Router 注册竞态不得遗漏 child；
+5. 命令正常结束、GUI 真正退出或托盘明确退出时，Runtime 先停止并关闭自己创建的全部 Claude child，再停止 Router；管理入口随后终止固定名称 Job Object 中主动加入的本工具命令进程。命令入口正常退出只关闭自己的 Job 句柄，不广播兄弟会话；Job 成员关系不依赖 EXE 文件名，因此改名后的本工具仍可清理。重复 Stop 幂等，Router 注册竞态不得遗漏 child；
 6. Claude child 正常退出后，命令进程移除自己的 registry 记录、停止 Router、关闭句柄并透传退出码；
 7. Router 与 launcher 属于同一 Go 进程，不存在独立 sidecar 的父进程探测或崩溃重启；本地失败结束当前命令会话，不自动重放；
 8. registry 枚举发现 Router PID 已不存在或记录损坏时，删除对应陈旧元数据；
