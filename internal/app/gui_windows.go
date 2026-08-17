@@ -159,6 +159,7 @@ var (
 var (
 	guiRuntime       *Runtime
 	guiWindow        windows.Handle
+	guiBackground    bool
 	guiStatusControl windows.Handle
 	guiInstance      windows.Handle
 	guiIcon          windows.Handle
@@ -244,8 +245,10 @@ type notifyIconData struct {
 func RunGUI(runtimeValue *Runtime, background bool) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	defer runtimeValue.Stop()
 	_, _, _ = procSetProcessDPIAware.Call()
 	guiRuntime = runtimeValue
+	guiBackground = background
 	settings, err := ReadDesktopSettings(runtimeValue.Executable)
 	if err != nil {
 		return err
@@ -273,7 +276,7 @@ func RunGUI(runtimeValue *Runtime, background bool) error {
 		return fmt.Errorf("CreateWindowExW: %w", callErr)
 	}
 	guiWindow = windows.Handle(window)
-	if background {
+	if guiBackground && guiTrayAdded {
 		procShowWindow.Call(window, swHide)
 	} else {
 		showManagementWindow()
@@ -295,7 +298,10 @@ func RunGUI(runtimeValue *Runtime, background bool) error {
 func windowProc(window windows.Handle, messageID uint32, wParam uintptr, lParam unsafe.Pointer) uintptr {
 	if taskbarCreated != 0 && messageID == taskbarCreated {
 		guiTrayAdded = false
-		_ = addTrayIcon(window)
+		if err := addTrayIcon(window); err != nil {
+			procShowWindow.Call(uintptr(window), swShow)
+			messageBox(err.Error(), "Claude Patch", 0x10)
+		}
 		return 0
 	}
 	switch messageID {
@@ -356,7 +362,7 @@ func windowProc(window windows.Handle, messageID uint32, wParam uintptr, lParam 
 		refreshStatus()
 		return 0
 	case wmClose:
-		if guiSettings.CloseToTray && !guiExiting {
+		if guiSettings.CloseToTray && guiTrayAdded && !guiExiting {
 			procShowWindow.Call(uintptr(window), swHide)
 			setFeedback("Claude Patch 仍在托盘运行。", false)
 			return 0

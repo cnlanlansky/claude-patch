@@ -72,8 +72,8 @@ func run(args []string) (uint32, error) {
 	if err != nil {
 		return 1, err
 	}
+	defer runtime.Stop()
 	if err := app.RunGUI(runtime, background); err != nil {
-		_ = runtime.Stop()
 		return 1, err
 	}
 	return 0, nil

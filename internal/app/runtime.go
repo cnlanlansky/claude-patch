@@ -23,6 +23,8 @@ type Runtime struct {
 	mu       sync.Mutex
 	sessions map[string]*claude.Session
 	stopping bool
+	stopOnce sync.Once
+	stopErr  error
 }
 
 func StartRuntime(executable string) (*Runtime, error) {
@@ -82,6 +84,7 @@ func (runtime *Runtime) StartClaude(args []string) (*claude.Session, error) {
 		delete(runtime.sessions, session.ID)
 		runtime.mu.Unlock()
 		_ = session.Stop()
+		_ = session.Close()
 		return nil, err
 	}
 	return session, nil
@@ -108,13 +111,26 @@ func (runtime *Runtime) stopSession(id string) error {
 }
 
 func (runtime *Runtime) Stop() error {
-	runtime.mu.Lock()
-	runtime.stopping = true
-	runtime.mu.Unlock()
-	if runtime.Router == nil {
-		return nil
-	}
-	return runtime.Router.Stop()
+	runtime.stopOnce.Do(func() {
+		runtime.mu.Lock()
+		runtime.stopping = true
+		sessions := make([]*claude.Session, 0, len(runtime.sessions))
+		for _, session := range runtime.sessions {
+			sessions = append(sessions, session)
+		}
+		runtime.sessions = make(map[string]*claude.Session)
+		runtime.mu.Unlock()
+
+		var errs []error
+		for _, session := range sessions {
+			errs = append(errs, session.Stop(), session.Close())
+		}
+		if runtime.Router != nil {
+			errs = append(errs, runtime.Router.Stop())
+		}
+		runtime.stopErr = errors.Join(errs...)
+	})
+	return runtime.stopErr
 }
 
 func ExecutablePath() (string, error) {

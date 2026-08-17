@@ -433,15 +433,16 @@ Claude Code 2.1.233 的原生 `/fast` 会在不支持模型上于 HTTP 请求之
 2. 无参数和 `--background` 管理入口用当前用户命名 mutex 保证单实例；重复普通启动只唤起已有窗口，重复后台启动静默退出；
 3. 每次 `claude [...]` 创建独立命令进程、进程内 Router、随机端口/session token 和一个 suspended Claude child，不受管理入口单实例限制；
 4. Claude child 加入 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` Job；命令进程异常退出或关闭 Job 时，Windows 终止其 child；
-5. Claude child 正常退出后，命令进程移除自己的 registry 记录、停止 Router、关闭句柄并透传退出码；
-6. Router 与 launcher 属于同一 Go 进程，不存在独立 sidecar 的父进程探测或崩溃重启；本地失败结束当前命令会话，不自动重放；
-7. registry 枚举发现 Router PID 已不存在或记录损坏时，删除对应陈旧元数据；
-8. 不使用系统常驻服务；管理 GUI 仅在用户显式开启开机启动后通过当前用户 Run 项登录启动，并可从托盘明确退出；
-9. 替换 EXE 不得覆盖同目录 `config.json`；卸载命令代理默认保留 EXE 与配置文件；
-10. 原生 GUI 只提供命令代理安装和卸载入口，不要求用户手工编辑 Claude 或 OpenCode 文件；
-11. 二进制名称固定为 `claude-patch.exe`；双击只打开管理程序，`--background` 只在托盘启动管理 Router；
-12. “登录 Windows 后启动”默认关闭，“关闭窗口后隐藏到托盘”默认开启；两项只在用户点击时写入本工具自己的 HKCU 注册表值；
-13. GUI 子系统 EXE 的命令模式附着父控制台，Claude child 继承标准输入、输出和错误句柄，不创建新 Console 窗口。
+5. 命令正常结束、GUI 真正退出或托盘明确退出时，Runtime 先停止并关闭自己创建的全部 Claude child，再停止 Router；重复 Stop 幂等，Router 注册竞态不得遗漏 child；
+6. Claude child 正常退出后，命令进程移除自己的 registry 记录、停止 Router、关闭句柄并透传退出码；
+7. Router 与 launcher 属于同一 Go 进程，不存在独立 sidecar 的父进程探测或崩溃重启；本地失败结束当前命令会话，不自动重放；
+8. registry 枚举发现 Router PID 已不存在或记录损坏时，删除对应陈旧元数据；
+9. 不使用系统常驻服务；管理 GUI 仅在用户显式开启开机启动后通过当前用户 Run 项登录启动，并可从托盘明确退出；
+10. 替换 EXE 不得覆盖同目录 `config.json`；卸载命令代理默认保留 EXE 与配置文件；
+11. 原生 GUI 只提供命令代理安装和卸载入口，不要求用户手工编辑 Claude 或 OpenCode 文件；
+12. 二进制名称固定为 `claude-patch.exe`；双击只打开管理程序，`--background` 只在托盘启动管理 Router；
+13. “登录 Windows 后启动”默认关闭，“关闭窗口后隐藏到托盘”默认开启；两项只在用户点击时写入本工具自己的 HKCU 注册表值；
+14. GUI 子系统 EXE 的命令模式附着父控制台，Claude child 继承标准输入、输出和错误句柄，不创建新 Console 窗口。
 
 ## 16. 凭据、安全与隐私
 

@@ -79,6 +79,8 @@ Provider 非 2xx 状态与正文不自动重试、翻译、换模型或降级。
 - 一个 kill-on-close Job；
 - 一份内存中的 token 映射。
 
+Runtime 真正退出时，以内存中的 session 所有权快照为准，先幂等停止并关闭本工具创建的全部 Claude child，再停止 Router；Router 注册竞态、命令正常结束、GUI 关闭和托盘明确退出都不能遗漏本工具自有 child。托盘图标不可用时 GUI 不隐藏窗口，避免失去退出入口。不会按进程名、PID 猜测或枚举清理外部 Claude/Router。
+
 `%TEMP%\claude-router-sessions` 只保存 session ID、Claude PID、startedAt、Router PID 和 Router ID，不保存 token、API key、prompt 或 tool result。其他 Router 可查看活跃元数据，但不能调用或停止不属于自己的 session。
 
 ## 命令代理
