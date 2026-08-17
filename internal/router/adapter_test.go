@@ -613,3 +613,153 @@ func TestResponsesMixedToolOrderingAndMissingID(t *testing.T) {
 		t.Fatalf("Responses 缺失 tool_use ID 未拒绝：%v", err)
 	}
 }
+
+func TestOpenCodeFreeReasoningRequestAndResponseRoundTrip(t *testing.T) {
+	body := map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": "先分析"},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "thinking", "thinking": "思考内容"},
+			map[string]any{"type": "text", "text": "答案"},
+		}},
+	}, "stream": false}
+	request, err := toChatRequestWithReasoning(body, "deepseek-v4-flash-free", false, false, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := sliceValue(request["messages"])
+	assistant := mapValue(messages[1])
+	if assistant["reasoning_content"] != "思考内容" || assistant["content"] != "答案" {
+		t.Fatalf("thinking 未转换为 reasoning_content：%v", assistant)
+	}
+
+	normalized := normalizeChatWithReasoning(map[string]any{
+		"id": "chat-1", "choices": []any{map[string]any{"message": map[string]any{
+			"reasoning_content": "思考内容", "content": "答案",
+		}, "finish_reason": "stop"}},
+	}, true)
+	response := anthropicResponse(normalized, "router-model", nil, true)
+	content := sliceValue(response["content"])
+	if len(content) != 2 || mapValue(content[0])["type"] != "thinking" || mapValue(content[0])["thinking"] != "思考内容" || mapValue(content[1])["text"] != "答案" {
+		t.Fatalf("thinking 响应 schema 错误：%v", content)
+	}
+}
+
+func TestOpenCodeFreeReasoningToolContinuation(t *testing.T) {
+	body := map[string]any{"messages": []any{
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "thinking", "thinking": "先查天气"},
+			map[string]any{"type": "text", "text": "我来查询"},
+			map[string]any{"type": "tool_use", "id": "call-1", "name": "lookup", "input": map[string]any{"query": "天气"}},
+		}},
+		map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "call-1", "content": "晴天"}}},
+	}, "stream": false}
+	request, err := toChatRequestWithReasoning(body, "deepseek-v4-flash-free", false, false, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := sliceValue(request["messages"])
+	assistant := mapValue(messages[0])
+	if assistant["reasoning_content"] != "先查天气" || len(sliceValue(assistant["tool_calls"])) != 1 || stringValue(mapValue(messages[1])["tool_call_id"]) != "call-1" {
+		t.Fatalf("thinking/tool continuation 错误：%v", messages)
+	}
+}
+
+func TestOpenCodeFreeReasoningStream(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`data: {"id":"chat-1","choices":[{"delta":{"reasoning_content":"思考"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chat-1","choices":[{"delta":{"reasoning_content":"中"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chat-1","choices":[{"delta":{"content":"答案"},"finish_reason":"stop"}]}`,
+		"", "data: [DONE]", "",
+	}, "\n"))
+	normalized := normalizeOpenAIStreamWithReasoning(raw, config.OpenAIChat, nil, true)
+	if normalized.ReasoningContent != "思考中" || normalized.Text != "答案" {
+		t.Fatalf("SSE reasoning 聚合错误：%+v", normalized)
+	}
+	stream := anthropicStream(normalized, "router-model", nil, true)
+	if !strings.Contains(string(stream), `"type":"thinking_delta"`) || !strings.Contains(string(stream), `"thinking":"思考中"`) {
+		t.Fatalf("Anthropic thinking SSE 错误：%s", stream)
+	}
+}
+
+func TestNonOpenCodeChatReasoningRemainsDisabled(t *testing.T) {
+	body := map[string]any{"messages": []any{map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "thinking", "thinking": "不要注入"}}}}}
+	request, err := toChatRequest(body, "upstream", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant := mapValue(first(sliceValue(request["messages"])))
+	if _, exists := assistant["reasoning_content"]; exists {
+		t.Fatalf("通用 Chat 意外注入 reasoning_content：%v", assistant)
+	}
+}
+
+func TestOpenCodeFreeProxyReasoningRoundTrip(t *testing.T) {
+	var requests []map[string]any
+	client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		response.Header().Set("Content-Type", "application/json")
+		if len(requests) == 1 {
+			_, _ = io.WriteString(response, `{"id":"chat-1","choices":[{"message":{"reasoning_content":"思考内容","content":"答案"},"finish_reason":"stop"}]}`)
+			return
+		}
+		_, _ = io.WriteString(response, `{"id":"chat-2","choices":[{"message":{"content":"继续答案"},"finish_reason":"stop"}]}`)
+	}))
+	provider := config.Provider{Label: "OpenCode Free", BaseURL: "https://provider.invalid/zen/v1", Protocol: config.OpenAIChat, Auth: config.AuthNone}
+	first, err := ProxyMessages(ProxyRequest{
+		Model: "router-model", UpstreamModel: "deepseek-v4-flash-free", ProviderID: "opencode-free", Protocol: config.OpenAIChat,
+		Body: map[string]any{"messages": []any{map[string]any{"role": "user", "content": "开始"}}, "stream": false},
+	}, provider, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(first.Body, &output); err != nil {
+		t.Fatal(err)
+	}
+	content := sliceValue(output["content"])
+	if len(content) != 2 || mapValue(content[0])["type"] != "thinking" {
+		t.Fatalf("Router 未返回 thinking block：%s", first.Body)
+	}
+	secondBody := map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": "开始"},
+		map[string]any{"role": "assistant", "content": content},
+		map[string]any{"role": "user", "content": "继续"},
+	}, "stream": false}
+	if _, err := ProxyMessages(ProxyRequest{
+		Model: "router-model", UpstreamModel: "deepseek-v4-flash-free", ProviderID: "opencode-free", Protocol: config.OpenAIChat,
+		Body: secondBody,
+	}, provider, client); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("fake upstream 请求次数错误：%d", len(requests))
+	}
+	messages := sliceValue(requests[1]["messages"])
+	assistant := mapValue(messages[1])
+	if assistant["reasoning_content"] != "思考内容" {
+		t.Fatalf("第二轮未回传 reasoning_content：%v", assistant)
+	}
+}
+
+func TestProviderReasoningPolicyIsolated(t *testing.T) {
+	body := map[string]any{"messages": []any{map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "thinking", "thinking": "内部推理"}}}}}
+	for _, providerID := range []string{"sub2api", "opencode-go", "custom"} {
+		prepared, err := providerAdapterFor(providerID).prepare(ProxyRequest{ProviderID: providerID, Protocol: config.OpenAIChat, Body: body}, config.Provider{Protocol: config.OpenAIChat}, "model", false)
+		if err != nil {
+			t.Fatalf("%s prepare 失败：%v", providerID, err)
+		}
+		if prepared.PreserveReasoningContent {
+			t.Fatalf("%s 意外启用 reasoning policy", providerID)
+		}
+		assistant := mapValue(first(sliceValue(prepared.Payload["messages"])))
+		if _, exists := assistant["reasoning_content"]; exists {
+			t.Fatalf("%s 意外注入 reasoning_content：%v", providerID, assistant)
+		}
+	}
+}

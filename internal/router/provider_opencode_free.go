@@ -11,6 +11,13 @@ import (
 type openCodeFreeAdapter struct{}
 
 func (openCodeFreeAdapter) prepare(request ProxyRequest, _ config.Provider, model string, fast bool) (preparedUpstream, error) {
+	if request.Protocol == config.OpenAIChat {
+		payload, err := toChatRequestWithReasoning(request.Body, model, fast, request.ForceStreaming, nil, true)
+		if err != nil {
+			return preparedUpstream{}, err
+		}
+		return preparedUpstream{Payload: payload, Path: "/v1/chat/completions", PreserveReasoningContent: true}, nil
+	}
 	payload, path, err := prepareProtocolRequest(request.Body, request.Protocol, model, fast, request.ForceStreaming, false, nil)
 	if err != nil {
 		return preparedUpstream{}, err

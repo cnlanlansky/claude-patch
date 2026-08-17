@@ -51,12 +51,13 @@ type NormalizedToolCall struct {
 }
 
 type NormalizedResponse struct {
-	ID           string
-	Text         string
-	Tools        []NormalizedToolCall
-	FinishReason string
-	InputTokens  int
-	OutputTokens int
+	ID               string
+	Text             string
+	ReasoningContent string
+	Tools            []NormalizedToolCall
+	FinishReason     string
+	InputTokens      int
+	OutputTokens     int
 }
 
 type UpstreamResponse struct {
@@ -126,7 +127,7 @@ func ProxyMessages(request ProxyRequest, provider config.Provider, client *http.
 		return nil, errors.New("upstream response body too large")
 	}
 	result.Body = raw
-	normalized, err := normalizeUpstream(raw, response.Header.Get("content-type"), protocol, prepared.Aliases)
+	normalized, err := normalizeUpstream(raw, response.Header.Get("content-type"), protocol, prepared.Aliases, prepared.PreserveReasoningContent)
 	if err != nil {
 		return result, nil
 	}
@@ -143,10 +144,10 @@ func ProxyMessages(request ProxyRequest, provider config.Provider, client *http.
 	searches := resolveSearches(ctx, normalized, request.WebSearch)
 	stream := boolValue(request.Body["stream"], true)
 	if stream {
-		result.Body = anthropicStream(normalized, request.Model, searches)
+		result.Body = anthropicStream(normalized, request.Model, searches, prepared.PreserveReasoningContent)
 		result.Header = http.Header{"Content-Type": []string{"text/event-stream"}, "Cache-Control": []string{"no-cache"}}
 	} else {
-		result.Body, _ = json.Marshal(anthropicResponse(normalized, request.Model, searches))
+		result.Body, _ = json.Marshal(anthropicResponse(normalized, request.Model, searches, prepared.PreserveReasoningContent))
 		result.Header = http.Header{"Content-Type": []string{"application/json"}}
 	}
 	return result, nil
@@ -197,7 +198,12 @@ func anthropicBody(body map[string]any, model string, allowFast, normalizeTools 
 }
 
 func toChatRequest(body map[string]any, model string, allowFast, forceStreaming bool, aliases map[string]string) (map[string]any, error) {
-	messages, err := anthropicMessages(body)
+	return toChatRequestWithReasoning(body, model, allowFast, forceStreaming, aliases, false)
+}
+
+func toChatRequestWithReasoning(body map[string]any, model string, allowFast, forceStreaming bool, aliases map[string]string, includeReasoning ...bool) (map[string]any, error) {
+	withReasoning := len(includeReasoning) > 0 && includeReasoning[0]
+	messages, err := anthropicMessagesWithReasoning(body, withReasoning)
 	if err != nil {
 		return nil, &RequestConversionError{Err: err}
 	}
@@ -332,6 +338,10 @@ func (ledger *toolCallLedger) requireComplete() error {
 }
 
 func anthropicMessages(body map[string]any) ([]any, error) {
+	return anthropicMessagesWithReasoning(body, false)
+}
+
+func anthropicMessagesWithReasoning(body map[string]any, includeReasoning bool) ([]any, error) {
 	var output []any
 	ledger := newToolCallLedger()
 	if system, exists := body["system"]; exists {
@@ -349,7 +359,22 @@ func anthropicMessages(body map[string]any) ([]any, error) {
 				output = append(output, map[string]any{"role": "assistant", "content": content})
 				continue
 			}
-			blocks := classifyToolBlocks(mapsFromSlice(content))
+			contentBlocks := mapsFromSlice(content)
+			reasoning := ""
+			if includeReasoning {
+				for _, block := range contentBlocks {
+					switch stringValue(block["type"]) {
+					case "thinking":
+						if stringValue(block["signature"]) != "" {
+							return nil, errors.New("OpenCode Free 不支持带 signature 的 thinking")
+						}
+						reasoning += stringValue(block["thinking"])
+					case "redacted_thinking":
+						return nil, errors.New("OpenCode Free 不支持 redacted_thinking")
+					}
+				}
+			}
+			blocks := classifyToolBlocks(contentBlocks)
 			if len(blocks.clientResults) > 0 {
 				return nil, errors.New("assistant 消息不能包含 tool_result")
 			}
@@ -374,7 +399,11 @@ func anthropicMessages(body map[string]any) ([]any, error) {
 					arguments, _ := json.Marshal(valueOr(block["input"], map[string]any{}))
 					calls = append(calls, map[string]any{"id": block["id"], "type": "function", "function": map[string]any{"name": name, "arguments": string(arguments)}})
 				}
-				output = append(output, map[string]any{"role": "assistant", "content": nullableText(content), "tool_calls": calls})
+				assistant := map[string]any{"role": "assistant", "content": nullableText(content), "tool_calls": calls}
+				if includeReasoning {
+					assistant["reasoning_content"] = reasoning
+				}
+				output = append(output, assistant)
 			}
 			for _, result := range blocks.serverResults {
 				output = append(output, map[string]any{"role": "tool", "tool_call_id": resultID(result), "content": toolResultText(result["content"])})
@@ -382,7 +411,11 @@ func anthropicMessages(body map[string]any) ([]any, error) {
 			if len(blocks.uses) > 0 || len(blocks.serverResults) > 0 {
 				continue
 			}
-			output = append(output, map[string]any{"role": "assistant", "content": textFromContent(content)})
+			assistant := map[string]any{"role": "assistant", "content": textFromContent(content)}
+			if includeReasoning {
+				assistant["reasoning_content"] = reasoning
+			}
+			output = append(output, assistant)
 			continue
 		}
 		if role == "tool" {
@@ -696,12 +729,13 @@ func toolChoice(body map[string]any, responses bool, aliases map[string]string) 
 	return nil
 }
 
-func normalizeUpstream(raw []byte, contentType string, protocol config.Protocol, aliases map[string]string) (NormalizedResponse, error) {
+func normalizeUpstream(raw []byte, contentType string, protocol config.Protocol, aliases map[string]string, includeReasoning ...bool) (NormalizedResponse, error) {
+	preserveReasoning := len(includeReasoning) > 0 && includeReasoning[0]
 	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
 		if protocol == config.AnthropicMessages {
 			return normalizeAnthropicStream(raw), nil
 		}
-		return normalizeOpenAIStream(raw, protocol, aliases), nil
+		return normalizeOpenAIStreamWithReasoning(raw, protocol, aliases, preserveReasoning), nil
 	}
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
@@ -713,10 +747,14 @@ func normalizeUpstream(raw []byte, contentType string, protocol config.Protocol,
 	if protocol == config.OpenAIResponses {
 		return normalizeResponses(body, aliases), nil
 	}
-	return normalizeChat(body), nil
+	return normalizeChatWithReasoning(body, preserveReasoning), nil
 }
 
 func normalizeChat(body map[string]any) NormalizedResponse {
+	return normalizeChatWithReasoning(body, false)
+}
+
+func normalizeChatWithReasoning(body map[string]any, includeReasoning bool) NormalizedResponse {
 	choice := mapValue(first(sliceValue(body["choices"])))
 	message := mapValue(valueOr(choice["message"], choice["delta"]))
 	var tools []NormalizedToolCall
@@ -728,7 +766,14 @@ func normalizeChat(body map[string]any) NormalizedResponse {
 		}
 	}
 	input, output := usage(body["usage"])
-	return NormalizedResponse{ID: stringOr(body["id"], "router_message"), Text: textFromContent(message["content"]), Tools: tools, FinishReason: stringValue(choice["finish_reason"]), InputTokens: input, OutputTokens: output}
+	result := NormalizedResponse{ID: stringOr(body["id"], "router_message"), Text: textFromContent(message["content"]), Tools: tools, FinishReason: stringValue(choice["finish_reason"]), InputTokens: input, OutputTokens: output}
+	if includeReasoning {
+		result.ReasoningContent = stringValue(message["reasoning_content"])
+		if result.ReasoningContent == "" {
+			result.ReasoningContent = stringValue(mapValue(choice["delta"])["reasoning_content"])
+		}
+	}
+	return result
 }
 
 func normalizeResponses(body map[string]any, aliases map[string]string) NormalizedResponse {
@@ -769,6 +814,10 @@ func normalizeAnthropic(body map[string]any) NormalizedResponse {
 }
 
 func normalizeOpenAIStream(raw []byte, protocol config.Protocol, aliases map[string]string) NormalizedResponse {
+	return normalizeOpenAIStreamWithReasoning(raw, protocol, aliases, false)
+}
+
+func normalizeOpenAIStreamWithReasoning(raw []byte, protocol config.Protocol, aliases map[string]string, includeReasoning bool) NormalizedResponse {
 	records := parseSSE(raw)
 	normalized := NormalizedResponse{ID: "router_message"}
 	tools := map[string]*NormalizedToolCall{}
@@ -779,6 +828,12 @@ func normalizeOpenAIStream(raw []byte, protocol config.Protocol, aliases map[str
 		normalized.ID = stringOr(valueOr(data["id"], response["id"]), normalized.ID)
 		choice := mapValue(first(sliceValue(data["choices"])))
 		delta := mapValue(choice["delta"])
+		if includeReasoning {
+			normalized.ReasoningContent += stringValue(delta["reasoning_content"])
+			if reasoning := stringValue(mapValue(choice["message"])["reasoning_content"]); reasoning != "" && normalized.ReasoningContent == "" {
+				normalized.ReasoningContent = reasoning
+			}
+		}
 		normalized.Text += textFromContent(delta["content"])
 		if reason := stringValue(choice["finish_reason"]); reason != "" {
 			normalized.FinishReason = reason
@@ -897,8 +952,11 @@ func normalizeAnthropicStream(raw []byte) NormalizedResponse {
 	return normalized
 }
 
-func anthropicResponse(normalized NormalizedResponse, model string, searches []searchResolution) map[string]any {
+func anthropicResponse(normalized NormalizedResponse, model string, searches []searchResolution, includeReasoning ...bool) map[string]any {
 	var content []any
+	if len(includeReasoning) > 0 && includeReasoning[0] && normalized.ReasoningContent != "" {
+		content = append(content, map[string]any{"type": "thinking", "thinking": normalized.ReasoningContent})
+	}
 	if normalized.Text != "" {
 		content = append(content, map[string]any{"type": "text", "text": normalized.Text})
 	}
@@ -935,8 +993,8 @@ func anthropicResponse(normalized NormalizedResponse, model string, searches []s
 	return map[string]any{"id": normalized.ID, "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": stop, "stop_sequence": nil, "usage": map[string]any{"input_tokens": normalized.InputTokens, "output_tokens": normalized.OutputTokens}}
 }
 
-func anthropicStream(normalized NormalizedResponse, model string, searches []searchResolution) []byte {
-	message := anthropicResponse(normalized, model, searches)
+func anthropicStream(normalized NormalizedResponse, model string, searches []searchResolution, includeReasoning ...bool) []byte {
+	message := anthropicResponse(normalized, model, searches, includeReasoning...)
 	blocks := sliceValue(message["content"])
 	var output bytes.Buffer
 	writeSSE(&output, "message_start", map[string]any{"type": "message_start", "message": mergeMap(message, map[string]any{"content": []any{}, "stop_reason": nil})})
@@ -946,6 +1004,8 @@ func anthropicStream(normalized NormalizedResponse, model string, searches []sea
 		var start any
 		if typeName == "text" {
 			start = map[string]any{"type": "text", "text": ""}
+		} else if typeName == "thinking" {
+			start = map[string]any{"type": "thinking", "thinking": ""}
 		} else if typeName == "tool_use" || typeName == "server_tool_use" {
 			start = map[string]any{"type": typeName, "id": block["id"], "name": block["name"], "input": map[string]any{}}
 		} else {
@@ -954,6 +1014,9 @@ func anthropicStream(normalized NormalizedResponse, model string, searches []sea
 		writeSSE(&output, "content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": start})
 		if typeName == "text" {
 			writeSSE(&output, "content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "text_delta", "text": block["text"]}})
+		}
+		if typeName == "thinking" {
+			writeSSE(&output, "content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "thinking_delta", "thinking": block["thinking"]}})
 		}
 		if typeName == "tool_use" || typeName == "server_tool_use" {
 			bytes, _ := json.Marshal(block["input"])

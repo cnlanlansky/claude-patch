@@ -7,9 +7,10 @@ import (
 )
 
 type preparedUpstream struct {
-	Payload map[string]any
-	Path    string
-	Aliases map[string]string
+	Payload                  map[string]any
+	Path                     string
+	Aliases                  map[string]string
+	PreserveReasoningContent bool
 }
 
 type upstreamAdapter interface {
