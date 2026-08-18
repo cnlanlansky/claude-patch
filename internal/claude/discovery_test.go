@@ -152,3 +152,93 @@ func TestCurrentClaude233Markers(t *testing.T) {
 		t.Fatal("未解析到真实 Claude native binary")
 	}
 }
+
+func testPatchImage() Image {
+	return Image{
+		SizeOfImage:   0x1000,
+		SizeOfHeaders: 0x200,
+		Bun:           Section{VirtualAddress: 0x400, VirtualSize: 0x400, RawOffset: 0x200, RawSize: 0x400},
+	}
+}
+
+func testPatchDisk(markers ...[]byte) []byte {
+	disk := make([]byte, 0x600)
+	offset := 0x200
+	for _, marker := range markers {
+		copy(disk[offset:], marker)
+		offset += len(marker) + 1
+	}
+	return disk
+}
+
+func TestPatchPlanRejectsMissingMarker(t *testing.T) {
+	image := testPatchImage()
+	disk := testPatchDisk()
+	old := patchSpecs
+	patchSpecs = []patchSpec{{label: "missing", original: []byte("missing-marker"), replacement: []byte("x")}}
+	t.Cleanup(func() { patchSpecs = old })
+	if _, err := buildPatchPlan(disk, image); err == nil {
+		t.Fatal("缺失 marker 未被拒绝")
+	}
+}
+
+func TestPatchPlanRejectsDuplicateMarker(t *testing.T) {
+	image := testPatchImage()
+	marker := []byte("duplicate-marker")
+	old := patchSpecs
+	patchSpecs = []patchSpec{{label: "duplicate", original: marker, replacement: marker}}
+	t.Cleanup(func() { patchSpecs = old })
+	disk := testPatchDisk(marker, marker)
+	if _, err := buildPatchPlan(disk, image); err == nil {
+		t.Fatal("重复 marker 未被拒绝")
+	}
+}
+
+func TestPatchPlanRejectsMarkerOutsideBun(t *testing.T) {
+	image := testPatchImage()
+	disk := make([]byte, 0x700)
+	copy(disk[0x100:], patchSpecs[0].original)
+	for offset, spec := range patchSpecs[1:] {
+		copy(disk[0x200+offset*0x40:], spec.original)
+	}
+	if _, err := buildPatchPlan(disk, image); err == nil {
+		t.Fatal(".bun 外 marker 未被拒绝")
+	}
+}
+
+func TestPatchPlanRejectsOverlap(t *testing.T) {
+	image := testPatchImage()
+	first := []byte("first-marker")
+	second := []byte("second-marker")
+	old := patchSpecs
+	patchSpecs = []patchSpec{{label: "first", original: first, replacement: first}, {label: "second", original: second, replacement: second}}
+	t.Cleanup(func() { patchSpecs = old })
+	disk := make([]byte, 0x600)
+	copy(disk[0x200:], first)
+	copy(disk[0x200+len(first)-2:], second)
+	if _, err := buildPatchPlan(disk, image); err == nil {
+		t.Fatal("重叠 marker 未被拒绝")
+	}
+}
+
+func TestBindPatchPlanRejectsMappedMismatch(t *testing.T) {
+	image := testPatchImage()
+	entries := []patchPlanEntry{{label: "marker", original: []byte("marker"), diskOffset: 0}}
+	if _, err := bindPatchPlan(image, 0x140000000, []byte("changed"), entries); err == nil {
+		t.Fatal("mapped marker 不一致未被拒绝")
+	}
+}
+
+func TestPatchPlanPadsReplacementToOriginalLength(t *testing.T) {
+	spec := patchSpec{original: []byte("original"), replacement: []byte("new")}
+	replacement := paddedReplacement(spec)
+	if len(replacement) != len(spec.original) || !bytes.Equal(replacement[:3], []byte("new")) || replacement[3] != 0x20 {
+		t.Fatalf("replacement padding 错误：%v", replacement)
+	}
+}
+
+func TestSubagentRequestEffortKeepsToolContext(t *testing.T) {
+	if !bytes.Equal(sqEffortRequestInherit, []byte("effortValue:Wb(re),")) {
+		t.Fatalf("request effort 必须从 tool context 读取：%q", sqEffortRequestInherit)
+	}
+}

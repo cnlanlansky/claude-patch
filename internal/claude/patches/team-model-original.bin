@@ -1,0 +1,1 @@
+function B4f(e,t){let r=q.CLAUDE_CODE_SUBAGENT_MODEL;if(r&&r!=="inherit"){let n=cs(r);if(Tu(n))return n;return F4f(r,t)}if(e==="inherit")return t??i9a(t);if(e!==void 0&&!Tu(e))return F4f(e,t);return e??i9a(t)}

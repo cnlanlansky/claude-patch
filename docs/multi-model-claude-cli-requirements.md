@@ -300,12 +300,12 @@ Claude Code 2.1.233 的原生 `/fast` 会在不支持模型上于 HTTP 请求之
 
 ## 11. 子 Agent 继承
 
-1. 所有新建子 Agent 都继承父会话创建当时的模型和 effort；
+1. 所有新建子 Agent 都继承直接父会话启动该 Agent 时的模型和 effort；
 2. 该规则同时适用于原生模型和项目模型；
 3. Agent frontmatter、Agent Tool 显式参数、内置 Explore/Plan 默认值和 `CLAUDE_CODE_SUBAGENT_MODEL` 不得静默覆盖；
-4. 父模型或 effort 变化后，新 Agent 使用新状态；
-5. 已运行或恢复的旧 Agent 保持创建时状态；
-6. 继承失败时阻止创建并显示原因，不退回 Haiku、Provider 默认模型或其他模型；
+4. Team 子进程的 model/effort 参数也必须来自直接父会话快照；
+5. 继承 model/effort 的 resolver、实际请求边界和 Team launcher 任一 marker 缺失或不一致时，child 在 resume 前失败关闭；
+6. 不允许回退到 Haiku、Opus、Sonnet、Provider 默认模型或其他 effort；
 7. 子 Agent 使用继承模型对应的 context 和 compact 阈值。
 
 这项规则是原生模型行为唯一明确允许改变的部分。
@@ -591,12 +591,11 @@ Provider 返回的 HTTP 状态和正文原样传给 Claude Code：
 
 至少覆盖原生 Anthropic、sub2api、DeepSeek、OpenCode Go 和 OpenCode Zen：
 
-- [ ] 普通 Agent 继承父模型和 effort；
+- [ ] 普通 Agent 继承直接父会话启动时的 model 和 effort；
 - [ ] Explore/Plan 等内置 Agent 不静默切其他模型；
 - [ ] frontmatter 和显式 Agent 参数不能覆盖强制继承；
-- [ ] 模型或 effort 改变后，新 Agent 使用新状态；
-- [ ] 已运行或恢复的旧 Agent 保持创建时状态；
-- [ ] 继承失败阻止创建，不降级。
+- [ ] Team 子进程的 model/effort 参数来自直接父会话；
+- [ ] 继承 marker 或 mapped 校验失败时 child 不 resume，不降级。
 
 ### 19.5 配置与生命周期验收
 

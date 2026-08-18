@@ -20,6 +20,7 @@ claude-patch.exe
 - GUI 的安装、卸载按钮和两个桌面开关均由用户显式触发，启动时只检测状态；
 - `claude [参数...]` 由命令代理调用，创建一个独立 Router 和一个新 Claude child，不受管理入口单实例限制；命令入口启动时加入固定名称的本工具 Windows Job Object，管理入口不加入该 Job；
 - `--self-check` 始终在 resume 前终止候选 child。
+- 新建子 Agent 的 native model resolver、实际请求 model/effort 和 Team launcher 均在同一 suspended child patch 事务中校验；继承 marker、映射或写入任一失败时 child 标记为不可 resume，不回退到默认模型或 effort。
 
 ## 请求边界
 
@@ -32,7 +33,12 @@ Router 用完整模型 ID 查找模型与 Provider。`enabled: false` 或 Provid
 
 Provider 非 2xx 状态与正文不自动重试、翻译、换模型或降级。Anthropic 原样响应逐块转发并传播请求取消；需要协议聚合或 server Web Search 的响应才会在 16 MiB 上限内缓冲。`count_tokens` 透明转发给对应 Provider，不伪造 token 数。Hop-by-hop 与编码/长度响应头由本地 HTTP server 重建，其余上游响应头透传。
 
-## 访问与配置
+### Agent model/effort 继承
+
+- 普通 Agent 的 resolver 和实际请求边界都读取直接父会话启动该 Agent 时的 model/effort；frontmatter、显式 tool 参数和 family fallback 不能覆盖；
+- Team 的独立 launcher 同样只使用直接父会话值，并把 effort 明确传给外部 child；
+- 继承 marker、mapped `.bun` 或写入事务任一失败时，child 标记为 tainted 并禁止 resume；不回退到默认模型、其他模型或默认 effort。
+
 
 - Router 只监听 `127.0.0.1:0`，并拒绝非 loopback Host；
 - 本机管理页无需登录，可直接访问 Router 根地址；`GET /`、`GET /api/state`、`PUT /api/config` 和本 Router 拥有的 session stop 接口属于管理面；
@@ -64,7 +70,7 @@ Provider 非 2xx 状态与正文不自动重试、翻译、换模型或降级。
 3. 加入带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job；
 4. `QueryFullProcessImageNameW` 确认实际映像；
 5. 解析 PE headers 并找到 mapped image base；
-6. 验证六组 patch marker 在磁盘和 mapped `.bun` 中均唯一、offset 一致；
+6. 验证全部继承 marker 在磁盘和 mapped `.bun` 中均唯一、offset 一致；包括普通 Agent resolver、实际请求边界和 Team launcher 的 model/effort 路径；
 7. `VirtualProtectEx` → `WriteProcessMemory` → 写后回读 → 恢复并复查保护；
 8. 全部成功后才 `ResumeThread`。
 

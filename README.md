@@ -24,6 +24,7 @@
 | 🔌 | **本地 Router** — 每个 Claude 命令会话使用独立 loopback 端口和随机 token |
 | 🔄 | **三种协议** — Anthropic Messages、OpenAI Chat Completions、OpenAI Responses |
 | 🧩 | **内存补丁** — 只修改本工具新建的 suspended child，成功后 resume；不改磁盘 binary |
+| 🤖 | **子 Agent 继承** — Agent 启动时继承直接父会话当前的 model 与 effort，无法确认时拒绝 resume |
 | ⌨️ | **命令代理管理** — GUI 明确提供安装、卸载 `claude` 命令 |
 | 📦 | **单个轻量 EXE** — 本工具运行不需要 Bun、Node、WebView2 或 Electron |
 

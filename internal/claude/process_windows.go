@@ -27,12 +27,14 @@ type Process struct {
 	ThreadID  uint32
 	ImagePath string
 
-	process windows.Handle
-	thread  windows.Handle
-	job     windows.Handle
-	resumed bool
-	closed  bool
-	mu      sync.Mutex
+	process  windows.Handle
+	thread   windows.Handle
+	job      windows.Handle
+	resumed  bool
+	closed   bool
+	tainted  bool
+	patching bool
+	mu       sync.Mutex
 }
 
 func CreateSuspended(executable string, args []string, workingDirectory string, overrides map[string]string) (*Process, error) {
@@ -149,14 +151,16 @@ func queryImagePath(handle windows.Handle) (string, error) {
 func (process *Process) Resume() error {
 	process.mu.Lock()
 	defer process.mu.Unlock()
-	if process.closed || process.resumed {
+	if process.closed || process.resumed || process.tainted || process.patching {
 		return errors.New("Claude child 无法 resume")
 	}
 	previous, err := windows.ResumeThread(process.thread)
 	if err != nil {
+		process.tainted = true
 		return fmt.Errorf("ResumeThread: %w", err)
 	}
 	if previous != 1 {
+		process.tainted = true
 		return fmt.Errorf("主线程 suspend count 异常：%d", previous)
 	}
 	process.resumed = true
@@ -195,15 +199,19 @@ func (process *Process) Wait(milliseconds uint32) (uint32, bool, error) {
 }
 
 func (process *Process) Terminate(code uint32) error {
-	if _, exited, _ := process.Wait(0); exited {
-		return nil
-	}
 	process.mu.Lock()
+	if process.patching {
+		process.mu.Unlock()
+		return errors.New("内存 patch 进行中，无法终止 child")
+	}
 	closed := process.closed
 	handle := process.process
 	process.mu.Unlock()
 	if closed || handle == 0 {
 		return errors.New("Claude child 句柄已关闭")
+	}
+	if _, exited, _ := process.Wait(0); exited {
+		return nil
 	}
 	if err := windows.TerminateProcess(handle, code); err != nil {
 		if _, exited, _ := process.Wait(0); exited {
@@ -223,6 +231,10 @@ func (process *Process) Terminate(code uint32) error {
 
 func (process *Process) Close() error {
 	process.mu.Lock()
+	if process.patching {
+		process.mu.Unlock()
+		return errors.New("内存 patch 进行中，无法关闭 child")
+	}
 	defer process.mu.Unlock()
 	if process.closed {
 		return nil
@@ -238,7 +250,6 @@ func (process *Process) Close() error {
 	}
 	return errors.Join(errs...)
 }
-
 func (process *Process) ReadMemory(address uintptr, size int) ([]byte, error) {
 	if size < 0 {
 		return nil, errors.New("远程读取长度无效")
@@ -314,43 +325,95 @@ func (process *Process) FindImageBase(headers []byte, imageBaseOffset uint32) (u
 	return candidates[0], nil
 }
 
+func (process *Process) markTainted() {
+	process.mu.Lock()
+	process.tainted = true
+	process.mu.Unlock()
+}
+
+func (process *Process) beginPatch() error {
+	process.mu.Lock()
+	defer process.mu.Unlock()
+	if process.closed || process.resumed || process.tainted || process.patching {
+		return errors.New("Claude child 无法开始内存 patch")
+	}
+	process.patching = true
+	return nil
+}
+
+func (process *Process) endPatch() {
+	process.mu.Lock()
+	process.patching = false
+	process.mu.Unlock()
+}
+
 func (process *Process) PatchData(address uintptr, expected, replacement []byte) error {
-	if process.Resumed() || len(expected) == 0 || len(expected) != len(replacement) {
-		return errors.New("内存 patch 必须针对 suspended child 且为非空同长度替换")
+	if len(expected) == 0 || len(expected) != len(replacement) {
+		process.markTainted()
+		return errors.New("内存 patch 必须为非空同长度替换")
+	}
+	if err := process.beginPatch(); err != nil {
+		return err
+	}
+	defer process.endPatch()
+	writeAttempted, err := process.writeDataLocked(address, expected, replacement, true)
+	if err == nil {
+		return nil
+	}
+	var restoreErr error
+	if writeAttempted {
+		_, restoreErr = process.writeDataLocked(address, nil, expected, false)
+	}
+	process.markTainted()
+	return errors.Join(err, restoreErr)
+}
+
+func (process *Process) writeDataLocked(address uintptr, expected, replacement []byte, checkExpected bool) (bool, error) {
+	if len(replacement) == 0 || (checkExpected && len(expected) != len(replacement)) {
+		return false, errors.New("内存 patch 数据长度无效")
 	}
 	regions, err := process.regions()
 	if err != nil {
-		return err
+		return false, err
 	}
 	var region *windows.MemoryBasicInformation
-	end := address + uintptr(len(expected))
+	end := address + uintptr(len(replacement))
+	if end < address {
+		return false, errors.New("内存 patch 地址溢出")
+	}
 	for index := range regions {
 		candidate := &regions[index]
 		if address >= candidate.BaseAddress && end <= candidate.BaseAddress+candidate.RegionSize {
 			if region != nil {
-				return errors.New("内存 patch 命中多个 region")
+				return false, errors.New("内存 patch 命中多个 region")
 			}
 			region = candidate
 		}
 	}
 	if region == nil || region.State != windows.MEM_COMMIT || region.Type != memImage || region.Protect&(windows.PAGE_NOACCESS|windows.PAGE_GUARD|pageExecuteFlags) != 0 {
-		return errors.New("内存 patch region 不可安全写入")
+		return false, errors.New("内存 patch region 不可安全写入")
 	}
-	before, err := process.ReadMemory(address, len(expected))
-	if err != nil || !bytes.Equal(before, expected) {
-		return errors.New("内存 patch 原字节不匹配")
+	if checkExpected {
+		before, err := process.ReadMemory(address, len(expected))
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(before, expected) {
+			return false, errors.New("内存 patch 原字节不匹配")
+		}
 	}
 	var oldProtect uint32
 	if err := windows.VirtualProtectEx(process.process, address, uintptr(len(replacement)), windows.PAGE_READWRITE, &oldProtect); err != nil {
-		return fmt.Errorf("VirtualProtectEx(write): %w", err)
+		return false, fmt.Errorf("VirtualProtectEx(write): %w", err)
 	}
 	if oldProtect != region.Protect {
 		var ignored uint32
 		_ = windows.VirtualProtectEx(process.process, address, uintptr(len(replacement)), oldProtect, &ignored)
-		return fmt.Errorf("VirtualProtectEx 原保护不一致：0x%x/0x%x", oldProtect, region.Protect)
+		return false, fmt.Errorf("VirtualProtectEx 原保护不一致：0x%x/0x%x", oldProtect, region.Protect)
 	}
 	var written uintptr
 	writeErr := windows.WriteProcessMemory(process.process, address, &replacement[0], uintptr(len(replacement)), &written)
+	writeAttempted := true
 	var ignored uint32
 	restoreErr := windows.VirtualProtectEx(process.process, address, uintptr(len(replacement)), oldProtect, &ignored)
 	if writeErr != nil || restoreErr != nil || written != uintptr(len(replacement)) {
@@ -358,17 +421,23 @@ func (process *Process) PatchData(address uintptr, expected, replacement []byte)
 		if written != uintptr(len(replacement)) {
 			lengthErr = fmt.Errorf("WriteProcessMemory 长度：%d/%d", written, len(replacement))
 		}
-		return errors.Join(writeErr, restoreErr, lengthErr)
+		return writeAttempted, errors.Join(writeErr, restoreErr, lengthErr)
 	}
 	after, err := process.ReadMemory(address, len(replacement))
-	if err != nil || !bytes.Equal(after, replacement) {
-		return errors.New("内存 patch 写后回读不匹配")
+	if err != nil {
+		return writeAttempted, err
+	}
+	if !bytes.Equal(after, replacement) {
+		return writeAttempted, errors.New("内存 patch 写后回读不匹配")
 	}
 	var restored windows.MemoryBasicInformation
-	if err := windows.VirtualQueryEx(process.process, address, &restored, unsafe.Sizeof(restored)); err != nil || restored.Protect != region.Protect {
-		return errors.New("内存 patch 页保护未恢复")
+	if err := windows.VirtualQueryEx(process.process, address, &restored, unsafe.Sizeof(restored)); err != nil {
+		return writeAttempted, err
 	}
-	return nil
+	if restored.Protect != region.Protect {
+		return writeAttempted, errors.New("内存 patch 页保护未恢复")
+	}
+	return writeAttempted, nil
 }
 
 func samePath(left, right string) bool {
