@@ -115,7 +115,7 @@ claude-patch.exe
 
 窗口会启动本地 Router，并显示 Claude 发现状态、Router 地址和命令代理状态。窗口标题包含 Claude Patch 自身版本（正式发布构建显示 `vX.Y.Z`，本地无 tag 构建显示 `dev`）。点击“打开 Web 管理”配置 Provider 与模型。双击不会自动启动 Claude。
 
-原生管理窗口底部的“检查更新”按钮会按需查询固定的 GitHub Releases API。发现新版本时打开对应 Release 页面供你手动下载；不会自动下载、替换或重启本程序。
+原生管理窗口底部的“检查更新”按钮会按需先查询固定的 GitHub Releases API；如果 API 返回 HTTP 403（常见于匿名 API 触发限流），则读取固定的 `releases/latest` 网页重定向作为只读回退，并严格校验仓库、协议和版本。发现新版本时打开对应 Release 页面供你手动下载；不会自动下载、替换或重启本程序。
 
 桌面设置提供两个开关：
 

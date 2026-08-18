@@ -7,16 +7,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const (
-	latestReleaseURL = "https://api.github.com/repos/cnlanlansky/claude-patch/releases/latest"
-	releaseURLBase   = "https://github.com/cnlanlansky/claude-patch/releases/tag/"
-	requestTimeout   = 5 * time.Second
-	maxReleaseBody   = 1 << 20
+	latestReleaseURL    = "https://api.github.com/repos/cnlanlansky/claude-patch/releases/latest"
+	latestReleaseWebURL = "https://github.com/cnlanlansky/claude-patch/releases/latest"
+	releaseURLBase      = "https://github.com/cnlanlansky/claude-patch/releases/tag/"
+	requestTimeout      = 5 * time.Second
+	maxReleaseBody      = 1 << 20
 )
 
 var releaseTagPattern = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)$`)
@@ -84,6 +87,20 @@ func Check(ctx context.Context, current string, client *http.Client) (Result, er
 		}
 		return Result{}, context.Canceled
 	}
+	if response.StatusCode == http.StatusForbidden {
+		_ = response.Body.Close()
+		latest, latestParts, fallbackErr := checkWebRelease(requestContext, &copyClient, current)
+		if fallbackErr != nil {
+			if errors.Is(fallbackErr, context.DeadlineExceeded) || errors.Is(requestContext.Err(), context.DeadlineExceeded) {
+				return Result{}, errors.New("检查更新超时")
+			}
+			if errors.Is(fallbackErr, context.Canceled) || errors.Is(requestContext.Err(), context.Canceled) {
+				return Result{}, context.Canceled
+			}
+			return Result{}, fmt.Errorf("GitHub 更新检查失败（HTTP 403）：%w", fallbackErr)
+		}
+		return resultForRelease(current, latest, latestParts)
+	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return Result{}, fmt.Errorf("GitHub 更新检查失败（HTTP %d）", response.StatusCode)
@@ -104,6 +121,49 @@ func Check(ctx context.Context, current string, client *http.Client) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
+	return resultForRelease(current, latest, latestParts)
+}
+
+func checkWebRelease(ctx context.Context, client *http.Client, current string) (string, versionParts, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, latestReleaseWebURL, nil)
+	if err != nil {
+		return "", versionParts{}, err
+	}
+	request.Header.Set("Accept", "text/html,application/xhtml+xml")
+	request.Header.Set("User-Agent", "Claude-Patch/"+current)
+	response, err := client.Do(request)
+	if err != nil {
+		return "", versionParts{}, err
+	}
+	if requestErr := ctx.Err(); requestErr != nil {
+		_ = response.Body.Close()
+		return "", versionParts{}, requestErr
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusMultipleChoices || response.StatusCode >= http.StatusBadRequest {
+		return "", versionParts{}, fmt.Errorf("GitHub Releases 页面未返回重定向（HTTP %d）", response.StatusCode)
+	}
+	return parseReleaseRedirect(response.Header.Get("Location"))
+}
+
+func parseReleaseRedirect(value string) (string, versionParts, error) {
+	redirect, err := url.Parse(value)
+	if err != nil || !strings.EqualFold(redirect.Scheme, "https") || !strings.EqualFold(redirect.Host, "github.com") || redirect.User != nil || redirect.RawQuery != "" || redirect.ForceQuery || redirect.Fragment != "" || redirect.Opaque != "" {
+		return "", versionParts{}, errors.New("GitHub Releases 重定向地址无效")
+	}
+	const releasePathPrefix = "/cnlanlansky/claude-patch/releases/tag/"
+	if !strings.HasPrefix(redirect.Path, releasePathPrefix) {
+		return "", versionParts{}, errors.New("GitHub Releases 重定向地址无效")
+	}
+	tag := strings.TrimPrefix(redirect.Path, releasePathPrefix)
+	_, parts, err := parseReleaseTag(tag)
+	if err != nil {
+		return "", versionParts{}, errors.New("GitHub Releases 重定向版本无效")
+	}
+	return tag, parts, nil
+}
+
+func resultForRelease(current, latest string, latestParts versionParts) (Result, error) {
 	result := Result{CurrentVersion: current, LatestVersion: latest, ReleaseURL: releaseURLBase + latest}
 	if current == "dev" {
 		result.DevelopmentBuild = true

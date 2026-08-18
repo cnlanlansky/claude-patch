@@ -92,7 +92,7 @@ GUI 只管理程序旁边带 ownership marker 的 `claude.cmd`，它通过 `%~dp
 ## 桌面生命周期
 
 - 主窗口使用纯 Win32/GDI 自绘，应用图标以多尺寸 ICO 资源嵌入同一个 EXE；不加载外部图片或 GUI runtime；窗口标题使用 `internal/version.Current`，正式 tag 构建由 linker 注入 `vX.Y.Z`，本地构建默认显示 `dev`；
-- 主窗口“检查更新”按钮只在用户点击时启动后台 HTTPS 请求，固定读取 GitHub `releases/latest` API，严格校验 `vX.Y.Z` 并比较版本；发现更新时只打开固定仓库的 Release 页面，不自动下载、替换或重启 EXE；请求失败只更新本地状态，不影响 Router 或 Claude child；
+- 主窗口“检查更新”按钮只在用户点击时启动后台 HTTPS 请求，首选固定读取 GitHub `releases/latest` API；如果 API 返回 HTTP 403（常见于匿名 API 触发限流），则读取固定的 `releases/latest` 网页重定向作为只读回退，并严格校验仓库、协议和 `vX.Y.Z` 版本；发现更新时只打开固定仓库的 Release 页面，不自动下载、替换或重启 EXE；请求失败只更新本地状态，不影响 Router 或 Claude child；
 - “登录 Windows 后启动”默认关闭，开启后精确管理 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ClaudePatch`，命令为当前 EXE 的 `--background`；遇到同名陌生值不覆盖；
 - “关闭窗口后隐藏到托盘”默认开启，偏好保存在 `HKCU\Software\ClaudePatch\CloseToTray`；托盘“退出”绕过隐藏行为并调用现有 `Runtime.Stop()`；
 - 托盘双击显示窗口，右键菜单提供显示、打开 Web 管理和退出；响应 `TaskbarCreated` 以恢复 Explorer 重启后丢失的图标；
