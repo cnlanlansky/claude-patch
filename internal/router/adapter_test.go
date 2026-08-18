@@ -103,6 +103,83 @@ func TestProxyMessagesProtocolsHeadersAndFast(t *testing.T) {
 	}
 }
 
+func TestEffortProtocolMapping(t *testing.T) {
+	body := map[string]any{
+		"messages":      []any{map[string]any{"role": "user", "content": "hi"}},
+		"output_config": map[string]any{"effort": "high"},
+		"reasoning":     map[string]any{"summary": "auto"},
+	}
+	anthropic, err := anthropicBody(body, "model", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapValue(anthropic["output_config"])["effort"] != "high" {
+		t.Fatalf("Anthropic effort 丢失：%v", anthropic)
+	}
+	chat, err := toChatRequest(body, "model", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat["reasoning_effort"] != "high" {
+		t.Fatalf("Chat effort 映射错误：%v", chat)
+	}
+	responses, err := toResponsesRequest(body, "model", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapValue(responses["reasoning"])["effort"] != "high" || mapValue(responses["reasoning"])["summary"] != "auto" {
+		t.Fatalf("Responses effort 映射错误：%v", responses)
+	}
+
+	body["output_config"] = map[string]any{"effort": "unsupported-provider-value"}
+	chat, err = toChatRequest(body, "model", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat["reasoning_effort"] != "unsupported-provider-value" {
+		t.Fatalf("Chat 不应擅自降级 effort：%v", chat)
+	}
+}
+
+func TestEffortProtocolMappingUsesFakeProvider(t *testing.T) {
+	protocols := []config.Protocol{config.AnthropicMessages, config.OpenAIChat, config.OpenAIResponses}
+	for _, protocol := range protocols {
+		t.Run(string(protocol), func(t *testing.T) {
+			var captured map[string]any
+			client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+					t.Fatal(err)
+				}
+				response.WriteHeader(http.StatusBadGateway)
+			}))
+			_, err := ProxyMessages(ProxyRequest{
+				Model: "router-model", Protocol: protocol,
+				Body: map[string]any{
+					"messages":      []any{map[string]any{"role": "user", "content": "hi"}},
+					"output_config": map[string]any{"effort": "high"},
+				},
+			}, config.Provider{Label: "Fake", BaseURL: "https://provider.invalid", Protocol: protocol, Auth: config.AuthNone}, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch protocol {
+			case config.AnthropicMessages:
+				if mapValue(captured["output_config"])["effort"] != "high" {
+					t.Fatalf("Anthropic fake Provider 请求丢失 effort：%v", captured)
+				}
+			case config.OpenAIChat:
+				if captured["reasoning_effort"] != "high" {
+					t.Fatalf("Chat fake Provider 请求丢失 effort：%v", captured)
+				}
+			case config.OpenAIResponses:
+				if mapValue(captured["reasoning"])["effort"] != "high" {
+					t.Fatalf("Responses fake Provider 请求丢失 effort：%v", captured)
+				}
+			}
+		})
+	}
+}
+
 func TestOpenCodeIdentityHeadersRequireOfficialHost(t *testing.T) {
 	provider := config.Provider{Label: "Fake", BaseURL: "https://attacker.invalid/zen/v1", Protocol: config.OpenAIChat, Auth: config.AuthNone}
 	headers := providerAdapterFor("opencode-free").headers(provider, nil, false, config.OpenAIChat, "opencode-free", "session")

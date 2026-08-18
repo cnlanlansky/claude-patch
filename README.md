@@ -206,7 +206,7 @@ Provider key 只由 Router 读取并注入上游请求；管理 API 只返回 `h
 - `/v1/models`、`/v1/messages/count_tokens`、`/v1/messages` 只接受当前 Router 注册的 session token；`count_tokens` 透明转发给对应 Provider，不伪造 token 数；
 - 管理页无需登录；Router 仅绑定 `127.0.0.1` 并拒绝非 loopback Host；
 - OpenCode Free 注入受控身份头；OpenCode Free 与 OpenCode Go 的 OpenAI Chat 路径保留 reasoning/thinking 往返；OpenCode Go 仅对对应路由强制上游 streaming；
-- tool call / tool result、Responses alias、server Web Search 和 SSE 聚合均在 Go adapter 中完成；
+- tool call / tool result、Responses alias、server Web Search 和 SSE 聚合均在 Go adapter 中完成；`output_config.effort` 在 Anthropic Messages 中原样保留，并映射为 OpenAI Chat 的 `reasoning_effort` 与 Responses 的 `reasoning.effort`，不擅自降级；
 - 上游非 2xx 状态、正文和安全响应头原样透传，不自动重试。
 
 ## 🧪 开发验证

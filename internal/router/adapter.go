@@ -215,6 +215,9 @@ func toChatRequestWithReasoning(body map[string]any, model string, allowFast, fo
 		request["stream_options"] = map[string]any{"include_usage": true}
 	}
 	copyIfPresent(request, body, "max_tokens", "temperature", "top_p")
+	if effort, ok := mapValue(body["output_config"])["effort"]; ok {
+		request["reasoning_effort"] = effort
+	}
 	if allowFast && stringValue(body["speed"]) == "fast" {
 		request["service_tier"] = "priority"
 	}
@@ -238,6 +241,11 @@ func toResponsesRequest(body map[string]any, model string, allowFast, forceStrea
 	}
 	if value, ok := body["max_tokens"]; ok {
 		request["max_output_tokens"] = value
+	}
+	if effort, ok := mapValue(body["output_config"])["effort"]; ok {
+		reasoning := cloneMap(mapValue(body["reasoning"]))
+		reasoning["effort"] = effort
+		request["reasoning"] = reasoning
 	}
 	if allowFast && stringValue(body["speed"]) == "fast" {
 		request["service_tier"] = "priority"
