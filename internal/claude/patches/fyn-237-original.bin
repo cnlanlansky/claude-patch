@@ -1,0 +1,1 @@
+function nCn(){if(!D7s())return[];let e=Ymd(M7s());if(!e||e.baseUrl!==V.ANTHROPIC_BASE_URL)return[];let t=Vmd.get(e);if(t)return t;let r=e.models.map((n)=>({value:n.id,label:Lie(n.display_name??"")||Lie(n.id),description:"From gateway"}));return Vmd.set(e,r),r}

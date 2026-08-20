@@ -33,10 +33,11 @@ func StartSession(value config.Config, origin, token string, args []string) (*Se
 	if origin == "" || token == "" {
 		return nil, fmt.Errorf("Claude session 路由凭据无效")
 	}
-	discovery, disk, image, err := ResolveAndRead(value.Claude.Executable)
+	loaded, err := resolveAndRead(value.Claude.Executable)
 	if err != nil {
 		return nil, err
 	}
+	discovery := loaded.Discovery
 	rows, err := BuildRowsEnvironment(config.BuildRows(value))
 	if err != nil {
 		return nil, err
@@ -58,7 +59,7 @@ func StartSession(value config.Config, origin, token string, args []string) (*Se
 		_ = process.Close()
 		return nil, cause
 	}
-	if err := Patch(process, discovery.ExecutablePath, disk, image); err != nil {
+	if err := Patch(loaded.profile, process, discovery.ExecutablePath, loaded.disk, loaded.image); err != nil {
 		return failed(err)
 	}
 	if err := process.Resume(); err != nil {

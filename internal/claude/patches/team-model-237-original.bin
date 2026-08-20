@@ -1,0 +1,1 @@
+function $Rf(e,t){let r=V.CLAUDE_CODE_SUBAGENT_MODEL;if(r&&r!=="inherit"){let n=ms(r);if(Nu(n))return n;return LRf(r,t)}if(e==="inherit")return DYa(t);if(e!==void 0&&!Nu(e))return LRf(e,t);return e??DYa(t)}

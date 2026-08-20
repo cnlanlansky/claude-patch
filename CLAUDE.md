@@ -2,7 +2,7 @@
 
 ## 产品边界
 
-- 仅支持 Windows x64 与 Claude Code v2.1.233；版本、PE、`.bun` 或 marker 不匹配时必须在 child resume 前失败关闭。
+- 仅支持 Windows x64 与 Claude Code v2.1.233、v2.1.237；每个版本均须匹配独立的 package identity、EXE SHA-256、PE、`.bun` 与 marker，否则必须在 child resume 前失败关闭。
 - 运行时保持纯 Go；不得重新引入 Bun、Node、Electron、WebView2 或其他 GUI runtime。
 - 无参数启动原生管理 GUI；`--background` 进入托盘；只有 `claude [...]` 创建 suspended Claude child。
 - 绿色目录固定为 `claude-patch.exe`、`config.json` 和用户点击安装后生成的 `claude.cmd`。只提供安装、卸载，不恢复修复功能或旧目录兼容。
@@ -36,6 +36,7 @@ git diff --check
 - 更新检查测试必须使用 fake HTTP client，不得自动化访问真实 GitHub；只允许用户显式点击时访问固定 Releases API 和固定网页回退地址。
 - `scripts/debug.ps1` 会覆盖 `dist\claude-patch.exe` 为 Console 版，交付前必须再执行 `scripts/build.ps1`。
 - 代码风格跟随相邻 Go 文件，优先标准库和现有 helper，不为单一实现新增抽象。
+- **新 Claude Code 版本适配**：先以版本号最高的已支持 profile 的 13 个逻辑 patch 点为语义模板，逐点在新 `.bun` 中定位等价函数并生成独立 marker/replacement；先完成 profile、静态唯一性、字节语义对照和最小 patch/resume smoke，再做用户指定的定点行为验收。不得先搭建或反复扩大临时 TTY/fake Provider 实验；所有临时取证只能放系统临时目录，完成即清理，不得留在项目根目录。
 
 ## 文档职责
 

@@ -66,6 +66,59 @@ var (
 	teamEffortOriginal []byte
 	//go:embed patches/team-effort-inherit.bin
 	teamEffortInherit []byte
+
+	//go:embed patches/fyn-237-original.bin
+	fyn237Original []byte
+	//go:embed patches/fyn-237-reader.bin
+	fyn237Reader []byte
+	//go:embed patches/fast-supported-237-original.bin
+	fastSupported237Original []byte
+	//go:embed patches/fast-supported-237-reader.bin
+	fastSupported237Reader []byte
+	//go:embed patches/fast-wire-state-237-original.bin
+	fastWireState237Original []byte
+	//go:embed patches/fast-wire-state-237-reader.bin
+	fastWireState237Reader []byte
+	//go:embed patches/fast-wire-speed-237-original.bin
+	fastWireSpeed237Original []byte
+	//go:embed patches/fast-wire-speed-237-reader.bin
+	fastWireSpeed237Reader []byte
+	//go:embed patches/context-lookup-237-original.bin
+	context237Original []byte
+	//go:embed patches/context-lookup-237-reader.bin
+	context237Reader []byte
+	//go:embed patches/project-client-237-original.bin
+	client237Original []byte
+	//go:embed patches/project-client-237-reader.bin
+	client237Reader []byte
+	//go:embed patches/zde-237-original.bin
+	zde237Original []byte
+	//go:embed patches/zde-237-inherit.bin
+	zde237Inherit []byte
+	//go:embed patches/ief-237-original.bin
+	ief237Original []byte
+	//go:embed patches/ief-237-inherit.bin
+	ief237Inherit []byte
+	//go:embed patches/sq-model-237-original.bin
+	sqModel237Original []byte
+	//go:embed patches/sq-model-237-inherit.bin
+	sqModel237Inherit []byte
+	//go:embed patches/sq-effort-237-original.bin
+	sqEffort237Original []byte
+	//go:embed patches/sq-effort-237-inherit.bin
+	sqEffort237Inherit []byte
+	//go:embed patches/sq-effort-request-237-original.bin
+	sqEffortRequest237Original []byte
+	//go:embed patches/sq-effort-request-237-inherit.bin
+	sqEffortRequest237Inherit []byte
+	//go:embed patches/team-model-237-original.bin
+	teamModel237Original []byte
+	//go:embed patches/team-model-237-inherit.bin
+	teamModel237Inherit []byte
+	//go:embed patches/team-effort-237-original.bin
+	teamEffort237Original []byte
+	//go:embed patches/team-effort-237-inherit.bin
+	teamEffort237Inherit []byte
 )
 
 type patchSpec struct {
@@ -83,7 +136,7 @@ type patchPlanEntry struct {
 	address      uintptr
 }
 
-var patchSpecs = []patchSpec{
+var patchSpecs233 = []patchSpec{
 	{"picker", fynOriginal, fynReader},
 	{"context lookup", contextOriginal, contextReader},
 	{"fast predicate", fastSupportedOriginal, fastSupportedReader},
@@ -99,13 +152,36 @@ var patchSpecs = []patchSpec{
 	{"team effort", teamEffortOriginal, teamEffortInherit},
 }
 
+var patchSpecs237 = []patchSpec{
+	{"picker", fyn237Original, fyn237Reader},
+	{"context lookup", context237Original, context237Reader},
+	{"fast predicate", fastSupported237Original, fastSupported237Reader},
+	{"fast wire state", fastWireState237Original, fastWireState237Reader},
+	{"fast wire speed", fastWireSpeed237Original, fastWireSpeed237Reader},
+	{"project client", client237Original, client237Reader},
+	{"subagent model", zde237Original, zde237Inherit},
+	{"subagent model telemetry", ief237Original, ief237Inherit},
+	{"subagent request model", sqModel237Original, sqModel237Inherit},
+	{"subagent effort", sqEffort237Original, sqEffort237Inherit},
+	{"subagent request effort", sqEffortRequest237Original, sqEffortRequest237Inherit},
+	{"team model", teamModel237Original, teamModel237Inherit},
+	{"team effort", teamEffort237Original, teamEffort237Inherit},
+}
+
+var profile237 = newCompatibilityProfile("2.1.237", []string{"@anthropic-ai/claude-code", "@anthropic-ai/claude-code-win32-x64"}, "406167231b3636e55a01d0ce93567256c61e7973489e645883302f14808ae668", patchSpecs237)
+
+var compatibilityProfiles = []compatibilityProfile{
+	newCompatibilityProfile("2.1.233", []string{"@anthropic-ai/claude-code"}, "8ae35d41252b02a7b747097ececf368b6872fab93ca104832b99a8ec5942fabd", patchSpecs233),
+	profile237,
+}
+
 func BuildRowsEnvironment(rows []config.PickerRow) (string, error) {
 	bytes, err := json.Marshal(rows)
 	return string(bytes), err
 }
 
-func ValidatePatchBytes(disk []byte, image Image) error {
-	_, err := buildPatchPlan(disk, image)
+func ValidatePatchBytes(profile compatibilityProfile, disk []byte, image Image) error {
+	_, err := buildPatchPlan(profile, disk, image)
 	return err
 }
 
@@ -121,12 +197,15 @@ func validateImagePatchRange(disk []byte, image Image) error {
 	return nil
 }
 
-func buildPatchPlan(disk []byte, image Image) ([]patchPlanEntry, error) {
+func buildPatchPlan(profile compatibilityProfile, disk []byte, image Image) ([]patchPlanEntry, error) {
+	if err := profile.validateDisk(disk); err != nil {
+		return nil, err
+	}
 	if err := validateImagePatchRange(disk, image); err != nil {
 		return nil, err
 	}
-	entries := make([]patchPlanEntry, 0, len(patchSpecs))
-	for _, spec := range patchSpecs {
+	entries := make([]patchPlanEntry, 0, len(profile.patchSpecs))
+	for _, spec := range profile.patchSpecs {
 		if len(spec.original) == 0 {
 			return nil, fmt.Errorf("%s 原体为空", spec.label)
 		}
@@ -183,11 +262,11 @@ func paddedReplacement(spec patchSpec) []byte {
 	return replacement
 }
 
-func Patch(process *Process, executable string, disk []byte, image Image) error {
+func Patch(profile compatibilityProfile, process *Process, executable string, disk []byte, image Image) error {
 	if !samePath(process.ImagePath, executable) {
 		return fmt.Errorf("Claude child 映像不一致：%s", process.ImagePath)
 	}
-	plan, err := buildPatchPlan(disk, image)
+	plan, err := buildPatchPlan(profile, disk, image)
 	if err != nil {
 		return err
 	}
@@ -302,44 +381,59 @@ func remoteByteOffsets(process *Process, address uintptr, size int, needle []byt
 	return offsets, nil
 }
 
-func ResolveAndRead(configured string) (Discovery, []byte, Image, error) {
-	discovery, err := Discover(configured)
+type loadedClaude struct {
+	Discovery Discovery
+	profile   compatibilityProfile
+	disk      []byte
+	image     Image
+}
+
+func resolveAndRead(configured string) (loadedClaude, error) {
+	discovery, profile, err := discoverProfile(configured)
 	if err != nil {
-		return Discovery{}, nil, Image{}, err
+		return loadedClaude{}, err
 	}
 	disk, image, err := ReadImage(discovery.ExecutablePath)
 	if err != nil {
+		return loadedClaude{}, err
+	}
+	if err := ValidatePatchBytes(profile, disk, image); err != nil {
+		return loadedClaude{}, err
+	}
+	return loadedClaude{Discovery: discovery, profile: profile, disk: disk, image: image}, nil
+}
+
+func ResolveAndRead(configured string) (Discovery, []byte, Image, error) {
+	loaded, err := resolveAndRead(configured)
+	if err != nil {
 		return Discovery{}, nil, Image{}, err
 	}
-	if err := ValidatePatchBytes(disk, image); err != nil {
-		return Discovery{}, nil, Image{}, err
-	}
-	return discovery, disk, image, nil
+	return loaded.Discovery, loaded.disk, loaded.image, nil
 }
 
 func Probe(configured string) (Discovery, error) {
-	discovery, disk, image, err := ResolveAndRead(configured)
+	loaded, err := resolveAndRead(configured)
 	if err != nil {
 		return Discovery{}, err
 	}
-	process, err := CreateSuspended(discovery.ExecutablePath, []string{"--version"}, filepath.Dir(discovery.ExecutablePath), nil)
+	process, err := CreateSuspended(loaded.Discovery.ExecutablePath, []string{"--version"}, filepath.Dir(loaded.Discovery.ExecutablePath), nil)
 	if err != nil {
 		return Discovery{}, err
 	}
 	defer process.Close()
 	defer process.Terminate(1)
-	if !samePath(process.ImagePath, discovery.ExecutablePath) {
+	if !samePath(process.ImagePath, loaded.Discovery.ExecutablePath) {
 		return Discovery{}, fmt.Errorf("Claude child 映像路径不一致：%s", process.ImagePath)
 	}
-	imageBase, err := process.FindImageBase(disk[:image.SizeOfHeaders], image.ImageBaseOffset)
+	imageBase, err := process.FindImageBase(loaded.disk[:loaded.image.SizeOfHeaders], loaded.image.ImageBaseOffset)
 	if err != nil {
 		return Discovery{}, err
 	}
-	if err := verifyMappedImage(process, imageBase, disk, image); err != nil {
+	if err := verifyMappedImage(process, imageBase, loaded.disk, loaded.image); err != nil {
 		return Discovery{}, err
 	}
 	if process.Resumed() {
 		return Discovery{}, errors.New("只读 probe 不得 resume child")
 	}
-	return discovery, nil
+	return loaded.Discovery, nil
 }

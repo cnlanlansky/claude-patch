@@ -1,0 +1,1 @@
+if(!i)throw Error("effort");t.push(`--effort ${i}`);

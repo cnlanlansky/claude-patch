@@ -2,11 +2,11 @@
 
 # ⚡ Claude Patch
 
-**用纯 Go 在 Claude Code v2.1.233 中接入第三方模型，同时保留原生 `/model`、`/fast` 与终端交互。**
+**用纯 Go 在 Claude Code v2.1.233、v2.1.237 中接入第三方模型，同时保留原生 `/model`、`/fast` 与终端交互。**
 
 <p>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square" alt="Windows x64">
-  <img src="https://img.shields.io/badge/Claude%20Code-v2.1.233-6B4FBB?style=flat-square" alt="Claude Code v2.1.233">
+  <img src="https://img.shields.io/badge/Claude%20Code-v2.1.233%20%7C%20v2.1.237-6B4FBB?style=flat-square" alt="Claude Code v2.1.233 或 v2.1.237">
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square" alt="Go 1.26">
 </p>
 
@@ -35,7 +35,7 @@ flowchart TB
     GUI["双击 claude-patch.exe<br/>Windows GUI + Web 管理"] --> R["Go loopback Router"]
     CMD["claude ...<br/>命令代理"] --> P["claude-patch.exe claude ..."]
     P --> S["独立 Router"]
-    P --> C["Claude Code 2.1.233<br/>suspended → patch → resume"]
+    P --> C["Claude Code 2.1.233 或 2.1.237<br/>suspended → patch → resume"]
     C --> A["原生模型<br/>Anthropic 直连"]
     C --> S
     S --> U["Sub2API · DeepSeek · OpenCode"]
@@ -46,7 +46,7 @@ GUI 和 `claude` 命令入口是同一个程序，但职责不同：无参数只
 ## 📦 前置条件
 
 - Windows x64；
-- Claude Code **v2.1.233**，可以通过 npm 或 Bun 安装；
+- Claude Code **v2.1.233 或 v2.1.237**，可以通过 npm 或 Bun 安装；
 - 真实 Provider API Key 由用户自行准备；
 - 只有从源码构建本工具时才需要 Go 1.26。
 
@@ -58,12 +58,12 @@ GUI 和 `claude` 命令入口是同一个程序，但职责不同：无参数只
 
 ZIP 只包含正式版 `claude-patch.exe`。`config.json` 会在首次从 Web 管理页保存时创建；`claude.cmd` 由 GUI 的“安装命令”按钮生成，两者都不包含在发布包内。
 
-### 安装 Claude Code 2.1.233
+### 安装 Claude Code 2.1.233 或 2.1.237
 
 ```powershell
-# 二选一
-npm install --global @anthropic-ai/claude-code@2.1.233
-bun add --global @anthropic-ai/claude-code@2.1.233
+# 二选一；两个版本可并存，Claude Patch 只会 patch 配置或发现结果命中的版本
+npm install --global @anthropic-ai/claude-code@2.1.237
+bun add --global @anthropic-ai/claude-code@2.1.237
 
 claude --version
 where.exe claude
@@ -222,7 +222,7 @@ git diff --check
 
 ```powershell
 $env:CLAUDE_PATCH_LIVE_PROBE = '1'
-go test ./internal/claude -run TestCurrentClaude233Markers -count=1 -v
+go test ./internal/claude -run TestCurrentClaudeMarkers -count=1 -v
 ```
 
 该测试只读磁盘，不创建或修改当前运行中的 Claude 会话。
@@ -246,7 +246,7 @@ claude --version
 where.exe claude
 ```
 
-必须是 2.1.233，并且发现结果需落到真实 AMD64 PE。Claude Patch 不会对“看起来差不多”的版本硬打补丁。
+必须是 2.1.233 或 2.1.237，并且发现结果需落到真实 AMD64 PE 与对应 package identity。Claude Patch 不会对“看起来差不多”的版本硬打补丁。
 
 ### 想彻底删除 Claude Patch
 

@@ -15,19 +15,30 @@ import (
 	"unicode/utf16"
 )
 
-const SupportedVersion = "2.1.233"
+type packageMetadata struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Path    string
+}
 
 type Discovery struct {
 	RequestedPath  string `json:"requestedPath"`
 	ExecutablePath string `json:"executablePath"`
 	WrapperPath    string `json:"wrapperPath,omitempty"`
+	PackageName    string `json:"packageName,omitempty"`
 	PackageVersion string `json:"packageVersion,omitempty"`
+	ProfileVersion string `json:"profileVersion,omitempty"`
 	Source         string `json:"source"`
 }
 
 func Discover(configured string) (Discovery, error) {
+	discovery, _, err := discoverProfile(configured)
+	return discovery, err
+}
+
+func discoverProfile(configured string) (Discovery, compatibilityProfile, error) {
 	if runtime.GOOS != "windows" || runtime.GOARCH != "amd64" {
-		return Discovery{}, errors.New("仅支持 Windows x64")
+		return Discovery{}, compatibilityProfile{}, errors.New("仅支持 Windows x64")
 	}
 	home, _ := os.UserHomeDir()
 	appData := os.Getenv("APPDATA")
@@ -65,7 +76,7 @@ func Discover(configured string) (Discovery, error) {
 			continue
 		}
 		seen[key] = struct{}{}
-		result, err := Resolve(absolute)
+		result, profile, err := resolveProfile(absolute)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				diagnostics = append(diagnostics, fmt.Sprintf("%s: %v", absolute, err))
@@ -73,25 +84,30 @@ func Discover(configured string) (Discovery, error) {
 			continue
 		}
 		result.Source = candidate.source
-		return result, nil
+		return result, profile, nil
 	}
 	if len(diagnostics) > 0 {
-		return Discovery{}, fmt.Errorf("未找到可 patch 的 Claude Code %s：%s", SupportedVersion, strings.Join(diagnostics, "; "))
+		return Discovery{}, compatibilityProfile{}, fmt.Errorf("未找到可 patch 的 Claude Code %s：%s", supportedVersions(), strings.Join(diagnostics, "; "))
 	}
-	return Discovery{}, fmt.Errorf("未找到 Claude Code %s", SupportedVersion)
+	return Discovery{}, compatibilityProfile{}, fmt.Errorf("未找到 Claude Code %s", supportedVersions())
 }
 
 func Resolve(requested string) (Discovery, error) {
+	discovery, _, err := resolveProfile(requested)
+	return discovery, err
+}
+
+func resolveProfile(requested string) (Discovery, compatibilityProfile, error) {
 	requested = filepath.Clean(requested)
 	info, err := os.Stat(requested)
 	if err != nil {
-		return Discovery{}, err
+		return Discovery{}, compatibilityProfile{}, err
 	}
 	if info.IsDir() || info.Size() == 0 {
-		return Discovery{}, fmt.Errorf("不是有效文件")
+		return Discovery{}, compatibilityProfile{}, fmt.Errorf("不是有效文件")
 	}
 	if isOwnedShim(requested) {
-		return Discovery{}, errors.New("跳过 Claude Patch 命令代理")
+		return Discovery{}, compatibilityProfile{}, errors.New("跳过 Claude Patch 命令代理")
 	}
 
 	result := Discovery{RequestedPath: requested, ExecutablePath: requested}
@@ -105,23 +121,27 @@ func Resolve(requested string) (Discovery, error) {
 	if strings.EqualFold(filepath.Ext(requested), ".cmd") || strings.EqualFold(filepath.Ext(requested), ".bat") {
 		target, err := resolveNPMShim(requested)
 		if err != nil {
-			return Discovery{}, err
+			return Discovery{}, compatibilityProfile{}, err
 		}
 		result.ExecutablePath = target
 		result.WrapperPath = requested
 	}
 
 	if strings.EqualFold(filepath.Ext(result.ExecutablePath), ".cmd") || strings.EqualFold(filepath.Ext(result.ExecutablePath), ".bat") {
-		return Discovery{}, errors.New("命令脚本不能直接 patch")
+		return Discovery{}, compatibilityProfile{}, errors.New("命令脚本不能直接 patch")
 	}
 	if err := validateNativePE(result.ExecutablePath); err != nil {
-		return Discovery{}, err
+		return Discovery{}, compatibilityProfile{}, err
 	}
-	result.PackageVersion = packageVersionBeside(result.ExecutablePath)
-	if result.PackageVersion != SupportedVersion {
-		return Discovery{}, fmt.Errorf("仅支持 Claude Code %s，检测到 %q", SupportedVersion, result.PackageVersion)
+	metadata := packageMetadataBeside(result.ExecutablePath)
+	profile, err := selectProfile(metadata.Name, metadata.Version)
+	if err != nil {
+		return Discovery{}, compatibilityProfile{}, err
 	}
-	return result, nil
+	result.PackageName = metadata.Name
+	result.PackageVersion = metadata.Version
+	result.ProfileVersion = profile.version
+	return result, profile, nil
 }
 
 func ParseBunx(path string) (string, error) {
@@ -175,25 +195,35 @@ func resolveNPMShim(path string) (string, error) {
 	return "", errors.New("npm shim 未找到 Claude Code native binary")
 }
 
-func packageVersionBeside(executable string) string {
+func packageMetadataBeside(executable string) packageMetadata {
+	directory := filepath.Dir(executable)
 	paths := []string{
-		filepath.Join(filepath.Dir(filepath.Dir(executable)), "package.json"),
-		filepath.Join(filepath.Dir(executable), "package.json"),
-		filepath.Join(filepath.Dir(executable), "..", "package.json"),
+		filepath.Join(directory, "package.json"),
+		filepath.Join(filepath.Dir(directory), "package.json"),
+		filepath.Join(directory, "..", "package.json"),
 	}
+	seen := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
+		path = filepath.Clean(path)
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = struct{}{}
 		bytes, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		var metadata struct {
-			Version string `json:"version"`
-		}
-		if json.Unmarshal(bytes, &metadata) == nil && metadata.Version != "" {
-			return metadata.Version
+		var metadata packageMetadata
+		if json.Unmarshal(bytes, &metadata) == nil && metadata.Name != "" && metadata.Version != "" {
+			metadata.Path = path
+			return metadata
 		}
 	}
-	return ""
+	return packageMetadata{}
+}
+
+func packageVersionBeside(executable string) string {
+	return packageMetadataBeside(executable).Version
 }
 
 func validateNativePE(path string) error {

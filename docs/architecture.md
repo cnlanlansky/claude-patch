@@ -6,7 +6,7 @@ claude-patch.exe
 ├── --background：单实例托盘 + loopback Web 管理 Router
 ├── claude [...]
 │   ├── per-session loopback Router
-│   └── Claude Code v2.1.233 suspended child
+│   └── Claude Code v2.1.233 或 v2.1.237 suspended child
 │       └── PE/.bun 校验 → 内存 patch → resume → wait
 └── --self-check：suspended/no-resume probe
 ```
@@ -59,7 +59,13 @@ Provider 非 2xx 状态与正文不自动重试、翻译、换模型或降级。
 4. npm optional `@anthropic-ai/claude-code-win32-x64`；
 5. 官方 native 目录与 PATH。
 
-最终目标必须是 Windows AMD64 PE32+、包含唯一有效 `.bun` section，并能从相邻 package metadata 读取精确版本 `2.1.233`。本工具自己的 `claude.cmd` ownership marker 会被跳过，避免递归启动。
+最终目标必须是 Windows AMD64 PE32+、包含唯一有效 `.bun` section，并同时匹配相邻 package metadata 的精确 package identity、版本和该版本 profile 的 EXE SHA-256。目前仅接受 `@anthropic-ai/claude-code@2.1.233`，以及 `@anthropic-ai/claude-code@2.1.237` 或 `@anthropic-ai/claude-code-win32-x64@2.1.237`。每个 profile 都有独立 marker，禁止跨版本复用。本工具自己的 `claude.cmd` ownership marker 会被跳过，避免递归启动。
+
+### 新版本适配流程
+
+新版本不是扩大现有 profile 的版本号范围。以版本号最高的已支持 profile 的 13 个逻辑点为模板，在新 `.bun` 中逐点定位等价函数：picker、context、fast 三处、项目 client、普通 Agent 的 model/telemetry/request model/effort，以及 Team 的 model/effort。新版本必须生成独立 marker/replacement、package identity 和 EXE SHA-256；不得复用旧版本 marker。
+
+实现顺序固定为：先完成静态唯一性、`.bun` 范围、replacement 字节预算、跨 profile 不交叉及父 model/effort 语义对照测试；再执行新建 suspended child 的 patch/resume `--version` smoke 和用户指定的最小行为验证。未知版本、任一 marker 不唯一或静态语义无法对照时停止，不用反复扩展 TTY、fake Provider 或全量交互实验代替源码级迁移。取证、提取和临时验收文件只放系统临时目录，完成后清理，不进入项目根目录或发布内容。
 
 ## Child 安全边界
 
