@@ -12,9 +12,14 @@ type openCodeFreeAdapter struct{}
 
 func (openCodeFreeAdapter) prepare(request ProxyRequest, _ config.Provider, model string, fast bool) (preparedUpstream, error) {
 	if request.Protocol == config.OpenAIChat {
-		payload, err := toChatRequestWithReasoning(request.Body, model, fast, request.ForceStreaming, nil, true)
+		// OpenCode CLI 的 Chat 协议始终使用 streaming，并要求上游附带 usage。
+		payload, err := toChatRequestWithReasoning(request.Body, model, fast, true, nil, true)
 		if err != nil {
 			return preparedUpstream{}, err
+		}
+		if model == "big-pickle" && stringValue(payload["reasoning_effort"]) == "max" {
+			// Big Pickle 未声明 max variant，Zen 收到该值会返回 Endpoint is unavailable。
+			delete(payload, "reasoning_effort")
 		}
 		return preparedUpstream{Payload: payload, Path: "/v1/chat/completions", PreserveReasoningContent: true}, nil
 	}

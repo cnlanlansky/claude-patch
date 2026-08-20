@@ -188,6 +188,48 @@ func TestOpenCodeIdentityHeadersRequireOfficialHost(t *testing.T) {
 	}
 }
 
+func TestOpenCodeFreeBigPickleRequestPolicy(t *testing.T) {
+	provider := config.Provider{Label: "OpenCode Free", BaseURL: "https://opencode.ai/zen/v1", Protocol: config.OpenAIChat, Auth: config.AuthNone}
+	for _, test := range []struct {
+		name, model, effort string
+		wantEffort          any
+	}{
+		{name: "Big Pickle max", model: "big-pickle", effort: "max"},
+		{name: "Big Pickle high", model: "big-pickle", effort: "high", wantEffort: "high"},
+		{name: "其他模型 max", model: "mimo-v2.5-free", effort: "max", wantEffort: "max"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var capturedPath string
+			var captured map[string]any
+			client := handlerClient(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				capturedPath = request.URL.Path
+				if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+					t.Fatal(err)
+				}
+				response.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(response, `{"id":"chat-1","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`)
+			}))
+			result, err := ProxyMessages(ProxyRequest{
+				Model: "claude-router/opencode-free/" + test.model, UpstreamModel: test.model, ProviderID: "opencode-free", Protocol: config.OpenAIChat,
+				Body: map[string]any{
+					"messages":      []any{map[string]any{"role": "user", "content": "hello"}},
+					"output_config": map[string]any{"effort": test.effort},
+					"stream":        false,
+				},
+			}, provider, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != http.StatusOK || capturedPath != "/zen/v1/chat/completions" {
+				t.Fatalf("OpenCode Free 上游请求错误：%d %s", result.Status, capturedPath)
+			}
+			if captured["model"] != test.model || captured["stream"] != true || mapValue(captured["stream_options"])["include_usage"] != true || captured["reasoning_effort"] != test.wantEffort {
+				t.Fatalf("OpenCode Free 请求未匹配 CLI 契约：%v", captured)
+			}
+		})
+	}
+}
+
 func TestProxyMessagesOpenCodeCompatibilityAndStreaming(t *testing.T) {
 	var captured http.Header
 	var body map[string]any

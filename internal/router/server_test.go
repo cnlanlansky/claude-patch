@@ -148,7 +148,7 @@ func TestRouterConfigMergeKeepsSecretsAndRejectsMalformedUpdates(t *testing.T) {
 }
 
 func TestRouterProxyPreservesUpstreamErrorsAndHeaders(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusBadGateway} {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusInternalServerError} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 				response.Header().Set("X-Upstream", "yes")
