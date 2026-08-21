@@ -363,7 +363,7 @@ func Test237AssetSemantics(t *testing.T) {
 	assertExactPatchReplacement(t, "2.1.237/subagent model", zde237Inherit, `function Nfe(e,t){return t}`)
 	assertExactPatchReplacement(t, "2.1.237/subagent model telemetry", ief237Inherit, `function yjp(e,t,r,n,o,i){return Nfe(e,t,r,n,o)}`)
 	assertExactPatchReplacement(t, "2.1.237/subagent request model", sqModel237Inherit, `options:{async getToolPermissionContext(){return mn(Q)},model:Jt,`)
-	assertExactPatchReplacement(t, "2.1.237/subagent effort", sqEffort237Inherit, `dt=[{kind:"model",mainLoopModel:ie},{kind:"effort",effort:Hv(Q)}],`)
+	assertExactPatchReplacement(t, "2.1.237/subagent effort", sqEffort237Inherit, `dt=[{kind:"model",mainLoopModel:ie},{kind:"effort",effort:Hv(r)}],`)
 	assertExactPatchReplacement(t, "2.1.237/subagent request effort", sqEffortRequest237Inherit, `effortValue:Hv(Q),`)
 	assertExactPatchReplacement(t, "2.1.237/team model", teamModel237Inherit, `function $Rf(e,t){if(typeof t!=="string"||t==="")throw Error("parent model unavailable");return t}`)
 	assertExactPatchReplacement(t, "2.1.237/team effort", teamEffort237Inherit, "if(!i)throw Error(\"effort\");t.push(`--effort ${i}`);")
@@ -415,7 +415,7 @@ func TestSubagentInheritancePatchSemantics(t *testing.T) {
 		{"普通 Agent model resolver", `function Zde(e,t){return t}`, `function Nfe(e,t){return t}`, zdeInherit, zde237Inherit, true},
 		{"普通 Agent telemetry resolver", `function iEf(e,t,r,n,o,i){return Zde(e,t,r,n,o)}`, `function yjp(e,t,r,n,o,i){return Nfe(e,t,r,n,o)}`, iefInherit, ief237Inherit, true},
 		{"普通 Agent request model", `options:{async getToolPermissionContext(){return yn(re)},model:M,`, `options:{async getToolPermissionContext(){return mn(Q)},model:Jt,`, sqModelInherit, sqModel237Inherit, true},
-		{"普通 Agent effort", `Et=[{kind:"model",mainLoopModel:ne},{kind:"effort",effort:Wb(r)}],`, `dt=[{kind:"model",mainLoopModel:ie},{kind:"effort",effort:Hv(Q)}],`, sqEffortInherit, sqEffort237Inherit, true},
+		{"普通 Agent effort", `Et=[{kind:"model",mainLoopModel:ne},{kind:"effort",effort:Wb(r)}],`, `dt=[{kind:"model",mainLoopModel:ie},{kind:"effort",effort:Hv(r)}],`, sqEffortInherit, sqEffort237Inherit, true},
 		{"普通 Agent request effort", `effortValue:Wb(re),`, `effortValue:Hv(Q),`, sqEffortRequestInherit, sqEffortRequest237Inherit, false},
 		{"Team model resolver", `function B4f(e,t){if(typeof t!=="string"||t==="")throw Error("parent model unavailable");return t}`, `function $Rf(e,t){if(typeof t!=="string"||t==="")throw Error("parent model unavailable");return t}`, teamModelInherit, teamModel237Inherit, false},
 		{"Team effort launcher", "if(!i)throw Error(\"effort\");t.push(`--effort ${i}`);", "if(!i)throw Error(\"effort\");t.push(`--effort ${i}`);", teamEffortInherit, teamEffort237Inherit, false},

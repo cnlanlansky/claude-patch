@@ -2,7 +2,7 @@
 
 > 状态：需求基线（纯 Go 产品实现已落地；本文未勾选或未附真实证据的项目仍不视为验收完成）
 > 决策基线：2026-08-15
-> Claude Code profile：2.1.233 已有历史 profile；2.1.237 已通过精确 profile、隔离启动与受控 fake Provider 行为证据，发布前仍须完成第 23 节所列的人工 Windows 对等验收
+> Claude Code profile：2.1.233 已有历史 profile；2.1.237 已通过精确 profile、隔离启动与受控 fake Provider 行为证据，第 23 节所列人工 Windows 对等验收仍未闭环
 > OpenCode CLI 调研样本：1.18.18
 > sub2api 源码样本：0.1.176
 > Claude Code 源码资料：2026-03-31 公开快照，仅作定位线索，不视为当前官方源码
@@ -675,7 +675,7 @@ Provider 返回的 HTTP 状态和正文原样传给 Claude Code：
 ## 23. 尚需真实环境闭环的事实
 
 1. 2.1.233 的 13 个独立 marker 在原生 `/model`、`/fast`、context 与项目模型 client 路由上的完整交互行为；静态唯一性、suspended patch 和 `--version` smoke 不能替代人工命令验收。
-2. 2.1.237 已通过独立 13 点 profile、静态唯一性、隔离 patch/resume 与 `/model`、`/fast`、`/effort`、`/context` 的 loopback fake Provider 证据；普通 Agent、内置 Agent、自定义 Agent 与 Team 的替换字节已逐项对照 2.1.233 的父 model / effort 继承语义，但其真实 child lineage 与双版本人工对等矩阵仍须在发布前完成。
+2. 2.1.237 已通过独立 13 点 profile、静态唯一性、隔离 patch/resume 与 `/model`、`/fast`、`/effort`、`/context` 的 loopback fake Provider 证据；普通 Agent 构造 permission layer 时读取直接父 `tool-use context`，实际请求边界读取已构造的 child context，两者不得混用；普通 Agent、内置 Agent、自定义 Agent 与 Team 的真实 child lineage 和双版本人工对等矩阵仍须完成。
 3. 原生模型直连 Anthropic、项目模型走当前命令会话 Router 的真实流量分流。
 4. Windows 安全机制、ASLR、CFG、npm 与 Bun 安装来源对新子进程内存适配的实际影响。
 5. `i.bug.pics` 当前账号可见模型、普通/compact effort、`count_tokens` 和 priority。

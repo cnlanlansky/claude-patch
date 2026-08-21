@@ -35,7 +35,7 @@ Provider 非 2xx 状态与正文不自动重试、翻译、换模型或降级。
 
 ### Agent model/effort 继承
 
-- 普通 Agent 的 resolver 和实际请求边界都读取直接父会话启动该 Agent 时的 model/effort；frontmatter、显式 tool 参数和 family fallback 不能覆盖；
+- 普通 Agent 构造 permission layer 时，从直接父 `tool-use context` 读取 model/effort；子 Agent 已构造后的实际请求边界再从当前 child context 读取，两个作用域不得混用；frontmatter、显式 tool 参数和 family fallback 不能覆盖；
 - Team 的独立 launcher 同样只使用直接父会话值，并把 effort 明确传给外部 child；
 - 继承 marker、mapped `.bun` 或写入事务任一失败时，child 标记为 tainted 并禁止 resume；不回退到默认模型、其他模型或默认 effort。
 
