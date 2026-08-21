@@ -180,11 +180,10 @@ func TestCheckHonorsCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("取消错误错误：%v", err)
 	}
-	ctx, cancel = context.WithTimeout(context.Background(), time.Nanosecond)
+	ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	time.Sleep(time.Millisecond)
 	_, err = Check(ctx, "v1.0.0", updateClient(http.StatusOK, `{"tag_name":"v1.0.1"}`, nil))
-	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "超时") {
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("超时错误错误：%v", err)
 	}
 }
