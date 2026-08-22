@@ -178,10 +178,10 @@ claude --resume
 <Claude Patch 目录>\config.json
 ```
 
-缺失时使用内嵌默认目录，第一次从 Web 管理页保存时创建。默认目录包含 4 个 Provider、13 个候选模型：
+缺失时使用内嵌默认目录，第一次从 Web 管理页保存时创建；已有 `config.json` 在管理程序启动时会检查并补齐本版本新增的内置模型。默认目录包含 4 个 Provider、14 个候选模型：
 
 - **Sub2API**：GPT 5.6 Sol、Luna、Terra；
-- **DeepSeek**：V4 Pro、V4 Flash；
+- **DeepSeek**：V4 Pro、V4 Flash、V4 Flash Vision Exp；
 - **OpenCode Free**：DeepSeek V4 Flash Free、Big Pickle、MiMo V2.5 Free；
 - **OpenCode Go**：DeepSeek V4 Flash、MiMo V2.5、Hy3、DeepSeek V4 Pro、MiniMax M3。
 

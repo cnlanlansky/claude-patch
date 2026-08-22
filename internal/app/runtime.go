@@ -46,6 +46,11 @@ func startRuntime(executable string, command bool) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !command {
+		if err := config.EnsureDeepSeekVisionModel(&loaded); err != nil {
+			return nil, err
+		}
+	}
 	if discovery, discoverErr := claude.Discover(loaded.Config.Claude.Executable); discoverErr == nil {
 		loaded.Config.Claude.Executable = discovery.RequestedPath
 	}

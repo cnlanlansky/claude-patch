@@ -45,7 +45,7 @@ Provider 非 2xx 状态与正文不自动重试、翻译、换模型或降级。
 - `GET /v1/models`、`POST /v1/messages/count_tokens` 和 `POST /v1/messages` 属于 Claude 会话面，每个 Claude child 使用独立 32 字节随机 session token；
 - session token 比较使用 constant-time compare；
 - 请求体上限 16 MiB，JSON 只允许单一对象；
-- `config.json` 位于 `claude-patch.exe` 旁边，严格拒绝未知字段；
+- `config.json` 位于 `claude-patch.exe` 旁边，严格拒绝未知字段；管理入口启动时只对已存在配置补齐本版本新增的内置模型，不创建缺失配置文件，也不恢复用户删除的 Provider。
 - 配置保存使用同目录临时文件和 Windows replace-existing rename；
 - 管理 API 只暴露 `hasApiKey` 和派生的 `configured`，不回显 Provider key；Provider key 也不进入 Claude child。
 

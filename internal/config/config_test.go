@@ -2,14 +2,16 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
 func TestDefaultCatalogAndRows(t *testing.T) {
 	value := Default()
-	if len(value.Providers) != 4 || len(value.Models) != 13 {
+	if len(value.Providers) != 4 || len(value.Models) != 14 {
 		t.Fatalf("默认目录异常：providers=%d models=%d", len(value.Providers), len(value.Models))
 	}
 	rows := BuildRows(value)
@@ -108,6 +110,121 @@ func TestSaveAndLoad(t *testing.T) {
 	if !loaded.Exists || len(loaded.Config.Models) != len(value.Models) {
 		t.Fatalf("配置读取异常：%+v", loaded)
 	}
+}
+
+func TestEnsureDeepSeekVisionModelAppendsAndPersistsOnce(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "claude-patch.exe")
+	value := Default()
+	value.Models = slices.DeleteFunc(value.Models, func(model Model) bool { return model.ID == deepSeekVisionModelID })
+	if err := Save(PathBeside(executable), value); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDeepSeekVisionModel(&loaded); err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Config.Models) != len(value.Models)+1 || loaded.Config.Models[len(loaded.Config.Models)-1].ID != deepSeekVisionModelID {
+		t.Fatalf("目标模型未追加到末尾：%+v", loaded.Config.Models)
+	}
+	persisted, err := Load(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Config.Models) != len(loaded.Config.Models) {
+		t.Fatalf("目标模型未持久化：%+v", persisted.Config.Models)
+	}
+	before, err := os.ReadFile(PathBeside(executable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDeepSeekVisionModel(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(PathBeside(executable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) || len(persisted.Config.Models) != len(loaded.Config.Models) {
+		t.Fatal("重复迁移修改了配置")
+	}
+}
+
+func TestEnsureDeepSeekVisionModelKeepsExistingModel(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "claude-patch.exe")
+	value := Default()
+	for index := range value.Models {
+		if value.Models[index].ID != deepSeekVisionModelID {
+			continue
+		}
+		value.Models[index].Label = "自定义视觉模型"
+		value.Models[index].ContextWindow = intPtr(123456)
+		value.Models[index].Fast = boolPtr(false)
+		value.Models[index].Enabled = boolPtr(false)
+	}
+	if err := Save(PathBeside(executable), value); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDeepSeekVisionModel(&loaded); err != nil {
+		t.Fatal(err)
+	}
+	model, ok := findModel(loaded.Config, deepSeekVisionModelID)
+	if !ok || model.Label != "自定义视觉模型" || model.ContextWindow == nil || *model.ContextWindow != 123456 || model.Fast == nil || *model.Fast || model.Enabled == nil || *model.Enabled {
+		t.Fatalf("已有模型被覆盖：%+v", model)
+	}
+}
+
+func TestEnsureDeepSeekVisionModelSkipsMissingConfigOrProvider(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "claude-patch.exe")
+	loaded, err := Load(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureDeepSeekVisionModel(&loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Exists {
+		t.Fatal("不存在的配置被错误标记为已存在")
+	}
+	if _, err := os.Stat(PathBeside(executable)); !os.IsNotExist(err) {
+		t.Fatalf("缺失配置被自动创建：%v", err)
+	}
+
+	value := Default()
+	value.Models = slices.DeleteFunc(value.Models, func(model Model) bool { return model.Provider == "deepseek" })
+	delete(value.Providers, "deepseek")
+	if err := Save(PathBeside(executable), value); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(loaded.Config.Models)
+	if err := EnsureDeepSeekVisionModel(&loaded); err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Config.Models) != before {
+		t.Fatal("缺失 DeepSeek Provider 时错误追加模型")
+	}
+}
+
+func findModel(value Config, id string) (Model, bool) {
+	for _, model := range value.Models {
+		if model.ID == id {
+			return model, true
+		}
+	}
+	return Model{}, false
 }
 
 func mustJSON(t *testing.T, value any) []byte {

@@ -164,6 +164,8 @@ Claude Code 自带的 Opus、Sonnet 等模型继续由 Claude Code 自己管理�
 - 本版本模型：
   - `deepseek-v4-flash`
   - `deepseek-v4-pro`
+  - `deepseek-v4-flash-vision-exp`
+- `deepseek-v4-flash-vision-exp` 是实验性视觉模型，支持图像输入；本项目仍沿用 DeepSeek Anthropic compatibility 路由，不把图像能力扩展到其他模型。
 - 当前官方资料：1,000,000 context、384,000 max output。
 
 官方 Anthropic 兼容入口优先。已知限制包括：部分 Anthropic headers 被忽略，`thinking.budget_tokens`、`tool_result.is_error` 和 `service_tier` 不受支持，MCP/code-execution 专用块不受支持。官方页面只说明 `output_config` 会处理 `effort`，没有公布可接受档位，因此 `max` 仍属于真实 API 待验证能力。
@@ -218,7 +220,7 @@ DeepSeek 不提供本项目语义下已确认的同模型 fast 通道。`message
 1. 配置文件固定为本工具可执行程序旁边的 `config.json`；
 2. 真实 API Key 可以直接写入该本地配置；
 3. 配置只由本工具读取，不写入 Claude 或 OpenCode 配置；
-4. 配置文件不存在时，使用随本工具版本内置的当前 Provider/model catalog；Sub2API 地址和需要认证的 Provider Key 仅使用占位值，不含真实凭据，首次通过管理页保存设置时才创建 `config.json`；
+4. 配置文件不存在时，使用随本工具版本内置的当前 Provider/model catalog；Sub2API 地址和需要认证的 Provider Key 仅使用占位值，不含真实凭据，首次通过管理页保存设置时才创建 `config.json`；已有配置仅在管理入口启动时按模型 ID 补齐本版本新增的内置模型，保留用户已有模型字段，不恢复用户删除的 Provider；
 5. 管理 Router 保存后立即采用新配置；已打开 Claude child 的 picker rows 是启动快照，不热更新，重新运行 `claude` 后完整生效；
 6. 多个命令会话各自在启动时读取同一份配置快照。
 
@@ -248,7 +250,7 @@ DeepSeek 不提供本项目语义下已确认的同模型 fast 通道。`message
 
 1. 原生 picker 保留 Claude Code 自带模型；
 2. 只有 `enabled` 且所属 Provider 已配置的项目模型才追加到同一 picker；同一过滤规则也用于 `/v1/models` 与消息路由；
-3. 默认目录包含 13 个候选模型，但缺省只有 `opencode-free` 已配置，因此默认只追加它的 3 个模型；
+3. 默认目录包含 14 个候选模型，但缺省只有 `opencode-free` 已配置，因此默认只追加它的 3 个模型；
 4. 不从远端目录自动加入陌生新模型；用户显式配置的自定义项除外；
 5. `display_name` 使用模型配置中的友好 label；context 与 fast 通过 picker row 的独立字段注入；
 6. 本地“已配置”只表示 URL/Key 结构完整，不代表 Key、额度、地区或模型在线状态已通过上游预检。
@@ -538,10 +540,10 @@ Provider 返回的 HTTP 状态和正文原样传给 Claude Code：
 
 ### 19.1 真实 API 范围
 
-本版本默认目录共 13 个候选项目模型；真实 API 验收范围覆盖全部候选模型，但运行时只暴露已配置 Provider 下启用的模型：
+本版本默认目录共 14 个候选项目模型；真实 API 验收范围覆盖全部候选模型，但运行时只暴露已配置 Provider 下启用的模型：
 
 - Sub2API：3 个；
-- DeepSeek：2 个；
+- DeepSeek：3 个；
 - OpenCode Go：5 个；
 - OpenCode Free：3 个。
 

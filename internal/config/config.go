@@ -100,6 +100,8 @@ var (
 	modelIDPattern    = regexp.MustCompile(`^claude-router/[a-z0-9][a-z0-9-]*/.+$`)
 )
 
+const deepSeekVisionModelID = "claude-router/deepseek/deepseek-v4-flash-vision-exp"
+
 func boolPtr(value bool) *bool             { return &value }
 func intPtr(value int) *int                { return &value }
 func protocolPtr(value Protocol) *Protocol { return &value }
@@ -132,6 +134,7 @@ func Default() Config {
 			model("sub2api", "gpt-5.6-terra", "Sub2API / GPT 5.6 Terra", nil, 1050000, boolPtr(true)),
 			model("deepseek", "deepseek-v4-pro", "DeepSeek / V4 Pro", nil, 1048576, nil),
 			model("deepseek", "deepseek-v4-flash", "DeepSeek / V4 Flash", nil, 1048576, nil),
+			model("deepseek", "deepseek-v4-flash-vision-exp", "DeepSeek / V4 Flash Vision Exp", nil, 1048576, nil),
 			model("opencode-free", "deepseek-v4-flash-free", "OpenCode Free / DeepSeek V4 Flash Free", protocolPtr(OpenAIChat), 200000, nil),
 			model("opencode-free", "big-pickle", "OpenCode Free / Big Pickle", protocolPtr(OpenAIChat), 200000, nil),
 			model("opencode-free", "mimo-v2.5-free", "OpenCode Free / MiMo V2.5 Free", protocolPtr(OpenAIChat), 200000, nil),
@@ -331,6 +334,31 @@ func Save(path string, value Config) error {
 		return err
 	}
 	return replaceFile(temporary, path)
+}
+
+func EnsureDeepSeekVisionModel(loaded *Loaded) error {
+	if loaded == nil || !loaded.Exists {
+		return nil
+	}
+	for _, model := range loaded.Config.Models {
+		if model.ID == deepSeekVisionModelID {
+			return nil
+		}
+	}
+	if _, ok := loaded.Config.Providers["deepseek"]; !ok {
+		return nil
+	}
+	defaults := Default()
+	for _, model := range defaults.Models {
+		if model.ID == deepSeekVisionModelID {
+			loaded.Config.Models = append(loaded.Config.Models, model)
+			if err := Save(loaded.Path, loaded.Config); err != nil {
+				return fmt.Errorf("自动补充 DeepSeek 模型：%w", err)
+			}
+			return nil
+		}
+	}
+	return errors.New("默认 DeepSeek 模型定义缺失")
 }
 
 func applyDefaultProfiles(value *Config) {
