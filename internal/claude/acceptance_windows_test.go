@@ -13,15 +13,23 @@ import (
 )
 
 func TestCurrentClaude237CommandPathSmoke(t *testing.T) {
+	testCurrentClaudeCommandPathSmoke(t, "2.1.237")
+}
+
+func TestCurrentClaude239CommandPathSmoke(t *testing.T) {
+	testCurrentClaudeCommandPathSmoke(t, "2.1.239")
+}
+
+func testCurrentClaudeCommandPathSmoke(t *testing.T, version string) {
 	if os.Getenv("CLAUDE_PATCH_LIVE_ACCEPTANCE") != "1" {
-		t.Skip("设置 CLAUDE_PATCH_LIVE_ACCEPTANCE=1 才运行隔离 2.1.237 命令路径 smoke；这不是原生交互验收")
+		t.Skip("设置 CLAUDE_PATCH_LIVE_ACCEPTANCE=1 才运行隔离命令路径 smoke；这不是原生交互验收")
 	}
 	root := os.Getenv("CLAUDE_PATCH_LIVE_ACCEPTANCE_ROOT")
 	if root == "" {
 		t.Fatal("缺少 CLAUDE_PATCH_LIVE_ACCEPTANCE_ROOT")
 	}
 	binary := filepath.Join(root, "node_modules", "@anthropic-ai", "claude-code-win32-x64", "claude.exe")
-	profile, err := selectProfile("@anthropic-ai/claude-code-win32-x64", "2.1.237")
+	profile, err := selectProfile("@anthropic-ai/claude-code-win32-x64", version)
 	if err != nil {
 		t.Fatal(err)
 	}

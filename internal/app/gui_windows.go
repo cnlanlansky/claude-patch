@@ -585,7 +585,7 @@ func drawBrand(dc windows.Handle) {
 	drawRoundedBox(dc, rectS(30, 24, 68, 62), colorPurple, colorPurple, 12)
 	drawText(dc, "ϟ", rectS(30, 26, 68, 60), fontTitle, colorCard, 0x00000001|0x00000004|0x00000020)
 	drawText(dc, "Claude Patch", rectS(82, 22, 500, 52), fontHero, colorInk, 0x00000020)
-	drawText(dc, "LOCAL CONTROL PLANE · CLAUDE CODE 2.1.233 / 2.1.237", rectS(84, 54, 550, 76), fontSmall, colorMuted, 0x00000020)
+	drawText(dc, "LOCAL CONTROL PLANE · CLAUDE CODE 2.1.233 / 2.1.237 / 2.1.239", rectS(84, 54, 550, 76), fontSmall, colorMuted, 0x00000020)
 	drawPill(dc, "ROUTER 运行中", rectS(592, 30, 722, 58), colorGreen)
 }
 
@@ -599,7 +599,7 @@ func drawSectionTitles(dc windows.Handle) {
 func drawStatusCards(dc windows.Handle) {
 	discovery, discoveryErr := claude.Discover(guiRuntime.Router.Config().Claude.Executable)
 	command, commandErr := CommandState(guiRuntime.Executable)
-	claudeMetric, claudeNote := "未检测到", "需要 Claude Code 2.1.233 或 2.1.237"
+	claudeMetric, claudeNote := "未检测到", "需要 Claude Code 2.1.233、2.1.237 或 2.1.239"
 	claudeColor := uint32(colorRed)
 	if discoveryErr == nil {
 		claudeMetric, claudeNote, claudeColor = discovery.PackageVersion, truncatePath(discovery.ExecutablePath, 29), colorGreen

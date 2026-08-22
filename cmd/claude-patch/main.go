@@ -11,7 +11,7 @@ import (
 )
 
 func usage() string {
-	return `Claude Patch：Claude Code v2.1.233、v2.1.237 本地模型补丁与管理网关
+	return `Claude Patch：Claude Code v2.1.233、v2.1.237、v2.1.239 本地模型补丁与管理网关
 
 用法：
   claude-patch.exe

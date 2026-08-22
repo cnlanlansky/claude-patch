@@ -2,7 +2,7 @@
 
 ## 产品边界
 
-- 仅支持 Windows x64 与 Claude Code v2.1.233、v2.1.237；每个版本均须匹配独立的 package identity、EXE SHA-256、PE、`.bun` 与 marker，否则必须在 child resume 前失败关闭。
+- 仅支持 Windows x64 与 Claude Code v2.1.233、v2.1.237、v2.1.239；每个版本均须匹配独立的 package identity、EXE SHA-256、PE、`.bun` 与 marker，否则必须在 child resume 前失败关闭。
 - 运行时保持纯 Go；不得重新引入 Bun、Node、Electron、WebView2 或其他 GUI runtime。
 - 无参数启动原生管理 GUI；`--background` 进入托盘；只有 `claude [...]` 创建 suspended Claude child。
 - 绿色目录固定为 `claude-patch.exe`、`config.json` 和用户点击安装后生成的 `claude.cmd`。只提供安装、卸载，不恢复修复功能或旧目录兼容。

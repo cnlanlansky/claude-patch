@@ -1,0 +1,1 @@
+function $Nn(){if(!uma())return[];let e=_Fd(dma());if(!e||e.baseUrl!==V.ANTHROPIC_BASE_URL)return[];let t=hFd.get(e);if(t)return t;let r=e.models.map((n)=>({value:n.id,label:xZ(n.display_name??"")||xZ(n.id),description:"From gateway"}));return hFd.set(e,r),r}

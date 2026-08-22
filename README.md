@@ -2,11 +2,11 @@
 
 # ⚡ Claude Patch
 
-**用纯 Go 在 Claude Code v2.1.233、v2.1.237 中接入第三方模型，同时保留原生 `/model`、`/fast` 与终端交互。**
+**用纯 Go 为受支持的 Claude Code 接入第三方模型，同时保留原生 `/model`、`/fast` 与终端交互。**
 
 <p>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square" alt="Windows x64">
-  <img src="https://img.shields.io/badge/Claude%20Code-v2.1.233%20%7C%20v2.1.237-6B4FBB?style=flat-square" alt="Claude Code v2.1.233 或 v2.1.237">
+  <img src="https://img.shields.io/badge/Claude%20Code-supported%20versions-6B4FBB?style=flat-square" alt="Claude Code 支持版本见下表">
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square" alt="Go 1.26">
 </p>
 
@@ -35,7 +35,7 @@ flowchart TB
     GUI["双击 claude-patch.exe<br/>Windows GUI + Web 管理"] --> R["Go loopback Router"]
     CMD["claude ...<br/>命令代理"] --> P["claude-patch.exe claude ..."]
     P --> S["独立 Router"]
-    P --> C["Claude Code 2.1.233 或 2.1.237<br/>suspended → patch → resume"]
+    P --> C["受支持的 Claude Code<br/>suspended → patch → resume"]
     C --> A["原生模型<br/>Anthropic 直连"]
     C --> S
     S --> U["Sub2API · DeepSeek · OpenCode"]
@@ -43,10 +43,17 @@ flowchart TB
 
 GUI 和 `claude` 命令入口是同一个程序，但职责不同：无参数只管理；`--background` 只在托盘启动管理 Router；`claude [参数...]` 才创建、patch 并等待 Claude child。管理入口为单实例，命令会话不受该限制。管理程序真正退出时，只终止本工具命令入口主动加入的 Windows Job；不会按 EXE 文件名扫描，因此改名后的本工具仍会被清理，外部 Claude/Router 不受影响。
 
-## 📦 前置条件
+## ✅ 支持版本
+
+| Claude Code 包 | 版本 | Windows x64 EXE SHA-256 |
+|---|---:|---|
+| `@anthropic-ai/claude-code` | 2.1.233 | `8ae35d41252b02a7b747097ececf368b6872fab93ca104832b99a8ec5942fabd` |
+| `@anthropic-ai/claude-code` / `@anthropic-ai/claude-code-win32-x64` | 2.1.237 | `406167231b3636e55a01d0ce93567256c61e7973489e645883302f14808ae668` |
+| `@anthropic-ai/claude-code` / `@anthropic-ai/claude-code-win32-x64` | 2.1.239 | `0bc1304c7847c317cc550007e7561f9bf270eaa68a0e85a3f381afb18ee20a2b` |
+
 
 - Windows x64；
-- Claude Code **v2.1.233 或 v2.1.237**，可以通过 npm 或 Bun 安装；
+- Claude Code，版本必须在上面的支持版本列表中，可以通过 npm 或 Bun 安装；
 - 真实 Provider API Key 由用户自行准备；
 - 只有从源码构建本工具时才需要 Go 1.26。
 
@@ -58,12 +65,13 @@ GUI 和 `claude` 命令入口是同一个程序，但职责不同：无参数只
 
 ZIP 只包含正式版 `claude-patch.exe`。`config.json` 会在首次从 Web 管理页保存时创建；`claude.cmd` 由 GUI 的“安装命令”按钮生成，两者都不包含在发布包内。
 
-### 安装 Claude Code 2.1.233 或 2.1.237
+### 安装 Claude Code
 
+请从上面的支持版本列表选择版本。示例：
 ```powershell
-# 二选一；两个版本可并存，Claude Patch 只会 patch 配置或发现结果命中的版本
-npm install --global @anthropic-ai/claude-code@2.1.237
-bun add --global @anthropic-ai/claude-code@2.1.237
+# 示例使用 2.1.239；也可以改为上面列表中的其他版本
+npm install --global @anthropic-ai/claude-code@2.1.239
+bun add --global @anthropic-ai/claude-code@2.1.239
 
 claude --version
 where.exe claude
@@ -246,7 +254,7 @@ claude --version
 where.exe claude
 ```
 
-必须是 2.1.233 或 2.1.237，并且发现结果需落到真实 AMD64 PE 与对应 package identity。Claude Patch 不会对“看起来差不多”的版本硬打补丁。
+必须是上面列表中的版本，并且发现结果需落到真实 AMD64 PE 与对应 package identity。Claude Patch 不会对“看起来差不多”的版本硬打补丁。
 
 ### 想彻底删除 Claude Patch
 

@@ -27,18 +27,18 @@ func TestProfileRegistry(t *testing.T) {
 			}
 		}
 	}
-	if len(profiles) != 2 {
+	if len(profiles) != 3 {
 		t.Fatalf("兼容 profile 数量错误：%d", len(profiles))
 	}
-	for _, expected := range []string{"2.1.233", "2.1.237"} {
+	for _, expected := range []string{"2.1.233", "2.1.237", "2.1.239"} {
 		if _, exists := profiles[expected]; !exists {
 			t.Fatalf("缺少 %s profile", expected)
 		}
 	}
-	if profiles["2.1.233"].executableSHA256 == profiles["2.1.237"].executableSHA256 {
+	if profiles["2.1.233"].executableSHA256 == profiles["2.1.237"].executableSHA256 || profiles["2.1.237"].executableSHA256 == profiles["2.1.239"].executableSHA256 || profiles["2.1.233"].executableSHA256 == profiles["2.1.239"].executableSHA256 {
 		t.Fatal("不同版本不得共用 EXE 指纹")
 	}
-	if bytes.Equal(profiles["2.1.233"].patchSpecs[0].original, profiles["2.1.237"].patchSpecs[0].original) {
+	if bytes.Equal(profiles["2.1.233"].patchSpecs[0].original, profiles["2.1.237"].patchSpecs[0].original) || bytes.Equal(profiles["2.1.237"].patchSpecs[0].original, profiles["2.1.239"].patchSpecs[0].original) {
 		t.Fatal("不同版本不得共用 picker 原体")
 	}
 }
@@ -51,6 +51,8 @@ func TestProfileSelectionRequiresExactPackageIdentity(t *testing.T) {
 		{"@anthropic-ai/claude-code", "2.1.233", "2.1.233"},
 		{"@anthropic-ai/claude-code", "2.1.237", "2.1.237"},
 		{"@anthropic-ai/claude-code-win32-x64", "2.1.237", "2.1.237"},
+		{"@anthropic-ai/claude-code", "2.1.239", "2.1.239"},
+		{"@anthropic-ai/claude-code-win32-x64", "2.1.239", "2.1.239"},
 	} {
 		profile, err := selectProfileFrom(profiles, candidate.name, candidate.version)
 		if err != nil {
@@ -62,6 +64,7 @@ func TestProfileSelectionRequiresExactPackageIdentity(t *testing.T) {
 	}
 	for _, candidate := range []struct{ name, version string }{
 		{"@anthropic-ai/claude-code-win32-x64", "2.1.233"},
+		{"@anthropic-ai/claude-code-win32-x64", "2.1.240"},
 		{"@anthropic-ai/other", "2.1.237"},
 		{"@anthropic-ai/claude-code", "2.1.236"},
 		{"@anthropic-ai/claude-code", "2.1.237-dev"},
@@ -388,6 +391,35 @@ func Test237AssetSemantics(t *testing.T) {
 	} {
 		if !bytes.Contains(client237Reader, value) {
 			t.Fatalf("project client 缺少 %q", value)
+		}
+	}
+}
+
+func Test239AssetSemantics(t *testing.T) {
+	assertExactPatchReplacement(t, "2.1.239/picker", fyn239Reader, `function $Nn(){try{let e=JSON.parse(process.env.CLAUDE_ROUTER_MODELS||"[]");return Array.isArray(e)?e:[]}catch{return[]}}`)
+	assertExactPatchReplacement(t, "2.1.239/context lookup", context239Reader, `function $x(e,t){return $Nn().find(n=>e==n.value)?.context??XFd()??(Oma(e,t)?gve:JFd(e,t))}`)
+	assertExactPatchReplacement(t, "2.1.239/subagent model", zde239Inherit, `function age(e,t){return t}`)
+	assertExactPatchReplacement(t, "2.1.239/subagent model telemetry", ief239Inherit, `function $3f(e,t,r,n,o,i){return age(e,t,r,n,o)}`)
+	assertExactPatchReplacement(t, "2.1.239/subagent request model", sqModel239Inherit, `options:{async getToolPermissionContext(){return gn(X)},model:Dt,`)
+	assertExactPatchReplacement(t, "2.1.239/subagent effort", sqEffort239Inherit, `ot=[{kind:"model",mainLoopModel:te},{kind:"effort",effort:xA(r)}],`)
+	assertExactPatchReplacement(t, "2.1.239/subagent request effort", sqEffortRequest239Inherit, `effortValue:xA(X),`)
+	assertExactPatchReplacement(t, "2.1.239/team model", teamModel239Inherit, `function jfm(e,t){if(typeof t!=="string"||t==="")throw Error("parent model unavailable");return t}`)
+	assertExactPatchReplacement(t, "2.1.239/team effort", teamEffort239Inherit, "if(!a)throw 0;s.push(`--effort ${a}`);")
+	if !bytes.Equal(fyn239Reader, []byte(`function $Nn(){try{let e=JSON.parse(process.env.CLAUDE_ROUTER_MODELS||"[]");return Array.isArray(e)?e:[]}catch{return[]}}`)) {
+		t.Fatalf("239 picker replacement 错误：%q", fyn239Reader)
+	}
+	if !bytes.Contains(client239Reader, []byte(`f["x-anthropic-additional-protection"]="true";if(r.startsWith("claude-router/"))`)) {
+		t.Fatal("239 project client 未保留 additional protection")
+	}
+	if !bytes.Contains(client239Reader, []byte("E(`")) {
+		t.Fatal("239 project client 丢失日志函数调用")
+	}
+	if bytes.Contains(client239Reader, []byte("let E=process.env,")) {
+		t.Fatal("239 project client 环境对象遮蔽日志函数")
+	}
+	for _, value := range [][]byte{[]byte("let P=process.env,"), []byte("P.CLAUDE_ROUTER_TOKEN"), []byte("P.CLAUDE_ROUTER_ORIGIN"), []byte("P.ANTHROPIC_CUSTOM_HEADERS=\"\""), []byte("timeout:3600000")} {
+		if !bytes.Contains(client239Reader, value) {
+			t.Fatalf("239 project client 缺少 %q", value)
 		}
 	}
 }

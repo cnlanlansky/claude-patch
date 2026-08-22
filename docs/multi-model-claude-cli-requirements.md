@@ -2,7 +2,7 @@
 
 > 状态：需求基线（纯 Go 产品实现已落地；本文未勾选或未附真实证据的项目仍不视为验收完成）
 > 决策基线：2026-08-15
-> Claude Code profile：2.1.233 已有历史 profile；2.1.237 已通过精确 profile、隔离启动与受控 fake Provider 行为证据，第 23 节所列人工 Windows 对等验收仍未闭环
+> Claude Code profile：2.1.233 已有历史 profile；2.1.237、2.1.239 已完成独立 profile、静态唯一性与语义对照；本轮未执行 2.1.239 的真实 patch/resume 或 fake Provider 行为 smoke，第 23 节所列人工 Windows 对等验收仍未闭环
 > OpenCode CLI 调研样本：1.18.18
 > sub2api 源码样本：0.1.176
 > Claude Code 源码资料：2026-03-31 公开快照，仅作定位线索，不视为当前官方源码
@@ -60,7 +60,7 @@
 2. **只使用原生命令**：不得用项目 slash command、外部控制面或兼容聊天客户端替代原生 `/model`、`/fast`、`/effort`。
 3. **采用新子进程内存适配**：launcher 启动用户现有 Claude Code 后，只修改这个新子进程的内存状态；不得修改磁盘上的 Claude 可执行文件，也不得注入已经运行的 Claude 进程。
 4. **失败即停止**：内存适配无法稳定满足需求时，原生行为验收闸门失败并报告证据；不得自动改成隔离副本、项目命令、fork 或其他降级方案。
-5. **固定支持 v2.1.233、v2.1.237**：Claude binary 必须先通过 Windows x64 PE、`.bun` 映射、精确 package identity、版本专属 EXE SHA-256、唯一适配 marker 和 suspended capability probe；其他版本或能力/marker 不完整时安全停止启动。
+5. **固定支持 v2.1.233、v2.1.237、v2.1.239**：Claude binary 必须先通过 Windows x64 PE、`.bun` 映射、精确 package identity、版本专属 EXE SHA-256、唯一适配 marker 和 suspended capability probe；其他版本或能力/marker 不完整时安全停止启动。
 6. **原生模型保留**：Opus、Sonnet 等原生模型仍显示、可选，并直接连接 Anthropic。
 7. **内置项目模型目录**：本版本内置已经确认的服务商和模型；用户可以在管理页显式新增或修改 Provider/模型，但本工具不会从远端目录自动发现、研究或接入陌生模型。
 8. **不做上游可用性检查**：本地先按第 22 条过滤明显未配置的 Provider，但不向上游预检 Key 有效性、额度、地区或模型在线状态；请求发出后，服务商返回什么错误就原样显示什么。
@@ -423,9 +423,9 @@ Claude Code 2.1.233 的原生 `/fast` 会在不支持模型上于 HTTP 请求之
 
 ### 14.3 版本边界
 
-当前发行版只适配 Windows x64 Claude Code v2.1.233、v2.1.237。每个版本使用独立 package identity、EXE SHA-256 和 13 个独立 marker profile；测试使用官方 npm Windows x64 候选包，写入系统临时目录；候选 child 可在隔离 smoke 中 patch、resume 并执行 `--version`，`--self-check` 则始终保持 suspended，完成后 terminate/close，不 resume。
+当前发行版只适配 Windows x64 Claude Code v2.1.233、v2.1.237、v2.1.239。每个版本使用独立 package identity、EXE SHA-256 和 13 个独立 marker profile；静态测试覆盖 profile、字节预算、唯一性和语义对照。Windows child patch/resume smoke 仅在显式提供临时安装根目录并启用验收开关后运行；`--self-check` 则始终保持 suspended，完成后 terminate/close，不 resume。
 
-启动时仍执行 package identity、版本专属 EXE SHA-256、PE、`.bun` 映射、唯一 marker 和内存回读校验。v2.1.233、v2.1.237 以外的版本不保证兼容；package identity、hash、marker、映像路径、映射内容或内存权限任一不匹配，均在 child resume 前安全拒绝。
+启动时仍执行 package identity、版本专属 EXE SHA-256、PE、`.bun` 映射、唯一 marker 和内存回读校验。v2.1.233、v2.1.237、v2.1.239 以外的版本不保证兼容；package identity、hash、marker、映像路径、映射内容或内存权限任一不匹配，均在 child resume 前安全拒绝。
 
 后续适配新版本时，以版本号最高的已支持 profile 的 13 个逻辑 patch 点为语义模板，逐点迁移到新 bundle；先完成独立 profile、静态唯一性和 replacement 语义对照，再做最小 patch/resume smoke 与用户指定的行为验证。不得以反复扩展 TTY、fake Provider 或全量交互实验代替源码级迁移；所有临时取证仅放系统临时目录并在完成后清理。
 
@@ -620,10 +620,11 @@ Provider 返回的 HTTP 状态和正文原样传给 Claude Code：
 
 ### 19.6 版本验收
 
-- [x] 2.1.233、2.1.237 各自通过 package identity、EXE SHA-256、PE、`.bun`、唯一 marker、suspended capability probe 与隔离 `--version` smoke；
+- [x] 2.1.233、2.1.237、2.1.239 各自完成 package identity、EXE SHA-256、PE、`.bun`、唯一 marker 与静态 patch 计划门禁；
+- [ ] 2.1.239 的 suspended capability probe 和隔离 `--version` smoke；
 - [x] 其他 Claude 版本不因 PE probe 或相似 marker 通过而自动启用；
 - [x] marker、package identity、EXE SHA-256 或结构不匹配时在 child resume 前拒绝；
-- [x] v2.1.233、v2.1.237 的候选 binary 必须匹配对应 profile 的固定 SHA，且仍经过 package identity、PE、`.bun` 与 marker 门禁；
+- [x] v2.1.233、v2.1.237、v2.1.239 的候选 binary 必须匹配对应 profile 的固定 SHA，且仍经过 package identity、PE、`.bun` 与 marker 门禁；
 - [ ] 探针失败时停止，不启用替代命令或其他客户端；
 - [ ] 不修改或替换用户 Claude executable。
 
@@ -637,7 +638,7 @@ Provider 返回的 HTTP 状态和正文原样传给 Claude Code：
 6. **错误真实性**：上游错误不润色，本地错误提供精确证据。
 7. **安全**：loopback、每 session token、凭据不进入 Claude child 或工具环境、默认不写磁盘日志。
 8. **可维护性**：项目模型目录和兼容数据随本工具版本更新；不运行时猜测未来模型。
-9. **版本边界明确**：当前只支持 v2.1.233、v2.1.237；未来版本必须重新提取 marker、package identity 与 EXE SHA-256 并完成独立验证，不因版本号或 PE probe 通过而自动启用。
+9. **版本边界明确**：当前只支持 v2.1.233、v2.1.237、v2.1.239；未来版本必须重新提取 marker、package identity 与 EXE SHA-256 并完成独立验证，不因版本号或 PE probe 通过而自动启用。
 10. **无副作用重放**：已产生输出或 tool call 后不自动重试。
 
 ## 21. 已确认事实
@@ -675,7 +676,7 @@ Provider 返回的 HTTP 状态和正文原样传给 Claude Code：
 ## 23. 尚需真实环境闭环的事实
 
 1. 2.1.233 的 13 个独立 marker 在原生 `/model`、`/fast`、context 与项目模型 client 路由上的完整交互行为；静态唯一性、suspended patch 和 `--version` smoke 不能替代人工命令验收。
-2. 2.1.237 已通过独立 13 点 profile、静态唯一性、隔离 patch/resume 与 `/model`、`/fast`、`/effort`、`/context` 的 loopback fake Provider 证据；普通 Agent 构造 permission layer 时读取直接父 `tool-use context`，实际请求边界读取已构造的 child context，两者不得混用；普通 Agent、内置 Agent、自定义 Agent 与 Team 的真实 child lineage 和双版本人工对等矩阵仍须完成。
+2. 2.1.237 已有独立 13 点 profile、静态唯一性、隔离 patch/resume 与 `/model`、`/fast`、`/effort`、`/context` 的 loopback fake Provider 证据；2.1.239 本轮仅完成独立 13 点 profile、静态唯一性、字节预算与源码语义对照，尚未执行 live patch/resume 或 fake Provider smoke。普通 Agent 构造 permission layer 时读取直接父 `tool-use context`，实际请求边界读取已构造的 child context，两者不得混用；普通 Agent、内置 Agent、自定义 Agent 与 Team 的真实 child lineage 和三版本人工对等矩阵仍须完成。
 3. 原生模型直连 Anthropic、项目模型走当前命令会话 Router 的真实流量分流。
 4. Windows 安全机制、ASLR、CFG、npm 与 Bun 安装来源对新子进程内存适配的实际影响。
 5. `i.bug.pics` 当前账号可见模型、普通/compact effort、`count_tokens` 和 priority。
@@ -707,11 +708,11 @@ Provider 返回的 HTTP 状态和正文原样传给 Claude Code：
 
 纯 Go 产品实现已经落地，但以下能力在对应真实交互证据闭环前不得对外宣称完成：
 
-- 2.1.233 或 2.1.237 的全部 Claude Code 原生命令均已兼容；
+- 2.1.233、2.1.237、2.1.239 的全部 Claude Code 原生命令均已兼容；
 - `/fast` 在每个已配置项目模型上安全可用；
 - context 可在同一会话严格动态切换并正确触发原生 compact；
-- 2.1.233 或 2.1.237 的所有子 Agent 已通过真实 child 流量证明强制继承模型与 effort；
+- 2.1.233、2.1.237、2.1.239 的所有子 Agent 已通过真实 child 流量证明强制继承模型与 effort；
 - 全部候选 Provider/模型均已通过真实 API 验收；
-- 支持 Claude Code v2.1.233、v2.1.237 以外的 Windows 版本。
+- 支持 Claude Code v2.1.233、v2.1.237、v2.1.239 以外的 Windows 版本。
 
 验收失败时应保留可重复证据，不得用项目命令、磁盘 patch 或其他客户端包装成“近似成功”。

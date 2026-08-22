@@ -1,0 +1,1 @@
+function UC(e){if(!Zu())return!1;let t=e??q8(),r=bs(t);if(A1($o(r),"fast_mode"))return!0;let n=r.toLowerCase();return n.includes("opus-4-8")||n.includes("opus-5")

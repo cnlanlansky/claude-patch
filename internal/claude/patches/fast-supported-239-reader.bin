@@ -1,0 +1,1 @@
+function UC(e,t){if(!Zu())return!1;e=bs(e??q8());return e.startsWith("claude-router/")?(!t||$Nn().find(n=>n.value==e).fast):A1($o(e),"fast_mode")||/opus/.test(e)

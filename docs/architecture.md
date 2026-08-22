@@ -6,7 +6,7 @@ claude-patch.exe
 ├── --background：单实例托盘 + loopback Web 管理 Router
 ├── claude [...]
 │   ├── per-session loopback Router
-│   └── Claude Code v2.1.233 或 v2.1.237 suspended child
+│   └── Claude Code v2.1.233、v2.1.237 或 v2.1.239 suspended child
 │       └── PE/.bun 校验 → 内存 patch → resume → wait
 └── --self-check：suspended/no-resume probe
 ```
@@ -59,7 +59,7 @@ Provider 非 2xx 状态与正文不自动重试、翻译、换模型或降级。
 4. npm optional `@anthropic-ai/claude-code-win32-x64`；
 5. 官方 native 目录与 PATH。
 
-最终目标必须是 Windows AMD64 PE32+、包含唯一有效 `.bun` section，并同时匹配相邻 package metadata 的精确 package identity、版本和该版本 profile 的 EXE SHA-256。目前仅接受 `@anthropic-ai/claude-code@2.1.233`，以及 `@anthropic-ai/claude-code@2.1.237` 或 `@anthropic-ai/claude-code-win32-x64@2.1.237`。每个 profile 都有独立 marker，禁止跨版本复用。本工具自己的 `claude.cmd` ownership marker 会被跳过，避免递归启动。
+最终目标必须是 Windows AMD64 PE32+、包含唯一有效 `.bun` section，并同时匹配相邻 package metadata 的精确 package identity、版本和该版本 profile 的 EXE SHA-256。目前仅接受 `@anthropic-ai/claude-code@2.1.233`，以及 `@anthropic-ai/claude-code@2.1.237` 或 `@anthropic-ai/claude-code-win32-x64@2.1.237`，以及 `@anthropic-ai/claude-code@2.1.239` 或 `@anthropic-ai/claude-code-win32-x64@2.1.239`。每个 profile 都有独立 marker，禁止跨版本复用。本工具自己的 `claude.cmd` ownership marker 会被跳过，避免递归启动。
 
 ### 新版本适配流程
 

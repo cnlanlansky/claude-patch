@@ -1,0 +1,1 @@
+function jfm(e,t){let r=V.CLAUDE_CODE_SUBAGENT_MODEL;if(r&&r!=="inherit"){let n=bs(r);if(Gu(n))return n;return Ufm(r,t)}if(e==="inherit")return Xwl(t);if(e!==void 0&&!Gu(e))return Ufm(e,t);return e??Xwl(t)}
