@@ -45,12 +45,11 @@ GUI 和 `claude` 命令入口是同一个程序，但职责不同：无参数只
 
 ## ✅ 支持版本
 
-| Claude Code 包 | 版本 | Windows x64 EXE SHA-256 |
-|---|---:|---|
-| `@anthropic-ai/claude-code` | 2.1.233 | `8ae35d41252b02a7b747097ececf368b6872fab93ca104832b99a8ec5942fabd` |
-| `@anthropic-ai/claude-code` / `@anthropic-ai/claude-code-win32-x64` | 2.1.237 | `406167231b3636e55a01d0ce93567256c61e7973489e645883302f14808ae668` |
-| `@anthropic-ai/claude-code` / `@anthropic-ai/claude-code-win32-x64` | 2.1.239 | `0bc1304c7847c317cc550007e7561f9bf270eaa68a0e85a3f381afb18ee20a2b` |
-
+| 版本 | Windows x64 EXE SHA-256 |
+|---:|---|
+| 2.1.233 | `8ae35d41252b02a7b747097ececf368b6872fab93ca104832b99a8ec5942fabd` |
+| 2.1.237 | `406167231b3636e55a01d0ce93567256c61e7973489e645883302f14808ae668` |
+| 2.1.239 | `0bc1304c7847c317cc550007e7561f9bf270eaa68a0e85a3f381afb18ee20a2b` |
 
 - Windows x64；
 - Claude Code，版本必须在上面的支持版本列表中，可以通过 npm 或 Bun 安装；
